@@ -4,11 +4,6 @@ import * as React from "react";
 import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 
-type UploadedFileInfo = {
-  name: string;
-  charCount: number;
-};
-
 type EventCard = {
   time: string;
   title: string;
@@ -17,131 +12,47 @@ type EventCard = {
   result: string;
 };
 
-type DbEventRow = EventCard & {
-  id: string;
-  created_at: string;
-};
-
-type SourceFileSummary = {
+type SourceFileRow = {
   source_file: string;
+  content: string;
   char_count: number;
+  synopsis: string | null;
 };
 
-const initialEvents: EventCard[] = [
-  {
-    time: "1万年前",
-    title: "カイネが神を滅ぼす",
-    cause: "神々による禁術の濫用で大地が崩壊寸前になる",
-    event: "カイネが神を滅ぼす",
-    result: "世界の法則が再編され、エクスロー暦が始まる",
-  },
-  {
-    time: "3200年前",
-    title: "灰燼戦役が勃発",
-    cause: "七王国間の資源争奪が激化する",
-    event: "灰燼戦役が勃発",
-    result: "北方交易路が断絶し、記録文明が急速に衰退",
-  },
-  {
-    time: "87年前",
-    title: "フェブスタークが記憶を失う",
-    cause: "禁書庫調査中の魔導暴走事故",
-    event: "フェブスタークが記憶を失う",
-    result: "王立史書院の正史に欠落が発生し、陰謀論が拡大",
-  },
-];
+type EventDbRow = EventCard & {
+  source_file: string;
+};
 
 export default function Home() {
-  const [uploadedFiles, setUploadedFiles] = useState<UploadedFileInfo[]>([]);
-  const [events, setEvents] = useState<EventCard[]>(initialEvents);
+  const [events, setEvents] = useState<EventCard[]>([]);
+  const [sourceFiles, setSourceFiles] = useState<SourceFileRow[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<string | null>(null);
+  const [isLoadingSourceFiles, setIsLoadingSourceFiles] = useState(false);
+  const [isLoadingEvents, setIsLoadingEvents] = useState(false);
+  const [isDeletingSourceFile, setIsDeletingSourceFile] = useState(false);
+  const [isSavingWork, setIsSavingWork] = useState(false);
+  const [isReextracting, setIsReextracting] = useState(false);
+  const [supabaseError, setSupabaseError] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  const [editingOriginalSourceFile, setEditingOriginalSourceFile] = useState<string | null>(
+    null
+  );
+  const [editSourceFile, setEditSourceFile] = useState("");
+  const [editSynopsis, setEditSynopsis] = useState("");
+  const [editContent, setEditContent] = useState("");
+
   const [question, setQuestion] = useState("");
   const [chatAnswer, setChatAnswer] = useState(
     "ここにAIの回答が表示されます。まずは世界観について質問してみてください。"
   );
-  const [isExtracting, setIsExtracting] = useState(false);
-  const [extractError, setExtractError] = useState<string | null>(null);
-  const [extractProgress, setExtractProgress] = useState<string | null>(null);
-  const [supabaseError, setSupabaseError] = useState<string | null>(null);
-  const [isLoadingFromDb, setIsLoadingFromDb] = useState(false);
-  const [isSavingToDb, setIsSavingToDb] = useState(false);
-  const [sourceFiles, setSourceFiles] = useState<
-    { sourceFile: string; charCount: number }[]
-  >([]);
-  const [isLoadingSourceFiles, setIsLoadingSourceFiles] = useState(false);
-  const [isDeletingSourceFile, setIsDeletingSourceFile] = useState(false);
-
-  const totalChars = useMemo(
-    () => uploadedFiles.reduce((sum, file) => sum + file.charCount, 0),
-    [uploadedFiles]
-  );
 
   const sourceFilesSummary = useMemo(() => {
     const workCount = sourceFiles.length;
-    const totalChars = sourceFiles.reduce((sum, row) => sum + row.charCount, 0);
+    const totalChars = sourceFiles.reduce((sum, row) => sum + Number(row.char_count ?? 0), 0);
     return { workCount, totalChars };
   }, [sourceFiles]);
-
-  const normalizeSourceFile = (sourceFile: string) =>
-    sourceFile
-      .split(",")
-      .map((name) => name.trim())
-      .filter(Boolean)
-      .filter((name, index, arr) => arr.indexOf(name) === index)
-      .sort((a, b) => a.localeCompare(b, "ja"))
-      .join(",");
-
-  const formatMaybeDecimal = (value: number) =>
-    Number.isFinite(value)
-      ? Number.isInteger(value)
-        ? value.toLocaleString()
-        : value.toFixed(1)
-      : "0";
-
-  const loadEventsFromDb = async (isCancelled?: () => boolean) => {
-    if (isCancelled?.()) return;
-    setIsLoadingFromDb(true);
-    setSupabaseError(null);
-
-    const { data, error } = await supabase
-      .from("events")
-      .select("id,time,title,cause,event,result,created_at")
-      .order("created_at", { ascending: false })
-      .limit(200);
-
-    if (isCancelled?.()) return;
-    if (error) {
-      setSupabaseError(error.message);
-      setIsLoadingFromDb(false);
-      return;
-    }
-
-    const rows = (data ?? []) as DbEventRow[];
-    if (isCancelled?.()) return;
-    setEvents(
-      rows.map(({ time, title, cause, event, result }) => ({
-        time,
-        title,
-        cause,
-        event,
-        result,
-      }))
-    );
-
-    if (isCancelled?.()) return;
-    setIsLoadingFromDb(false);
-  };
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      await loadEventsFromDb(() => cancelled);
-    };
-
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const loadSourceFiles = async () => {
     setIsLoadingSourceFiles(true);
@@ -149,7 +60,7 @@ export default function Home() {
 
     const { data, error } = await supabase
       .from("source_files")
-      .select("source_file,char_count")
+      .select("source_file,content,char_count,synopsis")
       .order("source_file", { ascending: true });
 
     if (error) {
@@ -158,204 +69,233 @@ export default function Home() {
       return;
     }
 
-    const rows = (data ?? []) as SourceFileSummary[];
-    setSourceFiles(
-      rows
-        .filter((row) => row.source_file.trim().length > 0)
-        .map((row) => ({
-          sourceFile: row.source_file.trim(),
-          charCount: Number(row.char_count ?? 0),
-        }))
-    );
-
+    setSourceFiles((data ?? []) as SourceFileRow[]);
     setIsLoadingSourceFiles(false);
+  };
+
+  const loadEvents = async () => {
+    setIsLoadingEvents(true);
+    setSupabaseError(null);
+
+    const { data, error } = await supabase
+      .from("events")
+      .select("source_file,time,title,cause,event,result")
+      .order("time", { ascending: true });
+
+    if (error) {
+      setSupabaseError(error.message);
+      setIsLoadingEvents(false);
+      return;
+    }
+
+    const rows = (data ?? []) as EventDbRow[];
+    setEvents(
+      rows.map((row) => ({
+        time: row.time,
+        title: row.title,
+        cause: row.cause,
+        event: row.event,
+        result: row.result,
+      }))
+    );
+    setIsLoadingEvents(false);
   };
 
   useEffect(() => {
     void loadSourceFiles();
+    void loadEvents();
   }, []);
 
-  const deleteSourceFile = async (sourceFile: string) => {
+  const upsertSourceFile = async (sourceFile: string, content: string) => {
+    const trimmed = sourceFile.trim();
+    if (!trimmed) return;
+
+    const { error } = await supabase.from("source_files").upsert(
+      {
+        source_file: trimmed,
+        content,
+        char_count: content.length,
+      },
+      { onConflict: "source_file" }
+    );
+
+    if (error) throw new Error(error.message);
+  };
+
+  const handleFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    if (isUploading) return;
+
+    setUploadError(null);
+    setUploadProgress(null);
+    setIsUploading(true);
+
+    try {
+      const fileArray = Array.from(files);
+
+      for (const file of fileArray) {
+        const rawText = await file.text();
+        setUploadProgress(`${file.name} を処理中...`);
+        await upsertSourceFile(file.name, rawText);
+      }
+
+      await loadSourceFiles();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setUploadError(message);
+    } finally {
+      setUploadProgress(null);
+      setIsUploading(false);
+    }
+  };
+
+  const deleteWork = async (sourceFile: string) => {
     const trimmed = sourceFile.trim();
     if (!trimmed) return;
 
     setIsDeletingSourceFile(true);
     setSupabaseError(null);
 
-    const { error } = await supabase
+    const { error: eventsError } = await supabase
       .from("events")
       .delete()
       .eq("source_file", trimmed);
 
-    if (error) {
-      setSupabaseError(error.message);
+    if (eventsError) {
+      setSupabaseError(eventsError.message);
       setIsDeletingSourceFile(false);
       return;
     }
 
-    const { error: sourceFileError } = await supabase
+    const { error: sourceError } = await supabase
       .from("source_files")
       .delete()
       .eq("source_file", trimmed);
 
-    if (sourceFileError) {
-      setSupabaseError(sourceFileError.message);
+    if (sourceError) {
+      setSupabaseError(sourceError.message);
       setIsDeletingSourceFile(false);
       return;
+    }
+
+    if (editingOriginalSourceFile === trimmed) {
+      setEditingOriginalSourceFile(null);
+      setEditSourceFile("");
+      setEditSynopsis("");
+      setEditContent("");
     }
 
     await loadSourceFiles();
+    await loadEvents();
     setIsDeletingSourceFile(false);
   };
 
-  const deleteUploadedFile = async (fileName: string, index: number) => {
-    const trimmed = fileName.trim();
-    if (!trimmed) return;
+  const openEditor = (work: SourceFileRow) => {
+    setEditingOriginalSourceFile(work.source_file);
+    setEditSourceFile(work.source_file);
+    setEditSynopsis(work.synopsis ?? "");
+    setEditContent(work.content ?? "");
+  };
 
-    setIsDeletingSourceFile(true);
+  const closeEditor = () => {
+    setEditingOriginalSourceFile(null);
+    setEditSourceFile("");
+    setEditSynopsis("");
+    setEditContent("");
+  };
+
+  const saveWorkMeta = async () => {
+    if (!editingOriginalSourceFile) return;
+    const newName = editSourceFile.trim();
+    if (!newName) return;
+
+    setIsSavingWork(true);
     setSupabaseError(null);
 
-    const { error } = await supabase
-      .from("events")
-      .delete()
-      .eq("source_file", trimmed);
-
-    if (error) {
-      setSupabaseError(error.message);
-      setIsDeletingSourceFile(false);
-      return;
-    }
-
-    const { error: sourceFileError } = await supabase
+    const { error: sourceUpdateError } = await supabase
       .from("source_files")
-      .delete()
-      .eq("source_file", trimmed);
+      .update({
+        source_file: newName,
+        synopsis: editSynopsis.trim() ? editSynopsis.trim() : null,
+      })
+      .eq("source_file", editingOriginalSourceFile);
 
-    if (sourceFileError) {
-      setSupabaseError(sourceFileError.message);
-      setIsDeletingSourceFile(false);
+    if (sourceUpdateError) {
+      setSupabaseError(sourceUpdateError.message);
+      setIsSavingWork(false);
       return;
     }
 
-    setUploadedFiles((prev) => prev.filter((_, i) => i !== index));
+    if (editingOriginalSourceFile !== newName) {
+      const { error: eventsRenameError } = await supabase
+        .from("events")
+        .update({ source_file: newName })
+        .eq("source_file", editingOriginalSourceFile);
+
+      if (eventsRenameError) {
+        setSupabaseError(eventsRenameError.message);
+        setIsSavingWork(false);
+        return;
+      }
+    }
+
+    setEditingOriginalSourceFile(newName);
     await loadSourceFiles();
-    await loadEventsFromDb();
-    setIsDeletingSourceFile(false);
+    await loadEvents();
+    setIsSavingWork(false);
   };
 
-  const saveEventsToDb = async (newEvents: EventCard[], sourceFile: string) => {
-    setIsSavingToDb(true);
+  const reextractEventsForEditingWork = async () => {
+    if (!editingOriginalSourceFile) return;
+
+    const currentName = editSourceFile.trim();
+    if (!currentName) return;
+
+    const text = editContent ?? "";
+    setIsReextracting(true);
     setSupabaseError(null);
-
-    const trimmedSourceFile = normalizeSourceFile(sourceFile);
-    if (!trimmedSourceFile) {
-      setSupabaseError("source_file is required to save events.");
-      setIsSavingToDb(false);
-      return;
-    }
-
-    const { error: deleteError } = await supabase
-      .from("events")
-      .delete()
-      .eq("source_file", trimmedSourceFile);
-
-    if (deleteError) {
-      setSupabaseError(deleteError.message);
-      setIsSavingToDb(false);
-      return;
-    }
-
-    const { error } = await supabase.from("events").insert(
-      newEvents.map((e) => ({
-        source_file: trimmedSourceFile,
-        time: e.time,
-        title: e.title,
-        cause: e.cause,
-        event: e.event,
-        result: e.result,
-      }))
-    );
-
-    if (error) {
-      setSupabaseError(error.message);
-    }
-
-    setIsSavingToDb(false);
-    await loadSourceFiles();
-  };
-
-  const handleFiles = async (files: FileList | null) => {
-    if (!files || files.length === 0) return;
-
-    if (isExtracting) return;
-    setExtractError(null);
-    setExtractProgress(null);
-    setIsExtracting(true);
 
     try {
-      const fileArray = Array.from(files);
-      const fileTexts = await Promise.all(fileArray.map((file) => file.text()));
+      const res = await fetch("/api/extract", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
 
-      const fileInfos: UploadedFileInfo[] = fileArray.map((file, idx) => ({
-        name: file.name,
-        charCount: fileTexts[idx].length,
-      }));
-
-      setUploadedFiles((prev) => [...prev, ...fileInfos]);
-
-      // MVP: 応答速度とトークン量を考慮して、先頭のみ送る（ファイルごと）
-      const MAX_INPUT_CHARS = 20000;
-
-      for (let i = 0; i < fileArray.length; i++) {
-        const file = fileArray[i];
-        const sourceFile = file.name.trim();
-        const rawText = fileTexts[i] ?? "";
-        const sourceFileCharCount = rawText.length;
-        const textForClaude =
-          rawText.length > MAX_INPUT_CHARS ? rawText.slice(0, MAX_INPUT_CHARS) : rawText;
-
-        setExtractProgress(`${sourceFile} を処理中...`);
-
-        const res = await fetch("/api/extract", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: textForClaude }),
-        });
-
-        if (!res.ok) {
-          const errBody = await res.json().catch(() => null);
-          throw new Error(
-            errBody?.error ? String(errBody.error) : `HTTP ${res.status}`
-          );
-        }
-
-        const data = (await res.json()) as { events?: EventCard[] };
-        const extractedEvents = Array.isArray(data.events) ? data.events : [];
-
-        if (extractedEvents.length > 0) {
-          const { error: upsertSourceFileError } = await supabase
-            .from("source_files")
-            .upsert(
-              { source_file: sourceFile, char_count: sourceFileCharCount },
-              { onConflict: "source_file" }
-            );
-
-          if (upsertSourceFileError) {
-            throw new Error(upsertSourceFileError.message);
-          }
-
-          await saveEventsToDb(extractedEvents, sourceFile);
-        }
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        throw new Error(errBody?.error ? String(errBody.error) : `HTTP ${res.status}`);
       }
 
-      await loadEventsFromDb();
-      await loadSourceFiles();
+      const data = (await res.json()) as { events?: EventCard[] };
+      const extractedEvents = Array.isArray(data.events) ? data.events : [];
+
+      const { error: deleteError } = await supabase
+        .from("events")
+        .delete()
+        .eq("source_file", currentName);
+      if (deleteError) throw new Error(deleteError.message);
+
+      if (extractedEvents.length > 0) {
+        const { error: insertError } = await supabase.from("events").insert(
+          extractedEvents.map((e) => ({
+            source_file: currentName,
+            time: e.time,
+            title: e.title,
+            cause: e.cause,
+            event: e.event,
+            result: e.result,
+          }))
+        );
+        if (insertError) throw new Error(insertError.message);
+      }
+
+      await loadEvents();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setExtractError(message);
+      setSupabaseError(message);
     } finally {
-      setExtractProgress(null);
-      setIsExtracting(false);
+      setIsReextracting(false);
     }
   };
 
@@ -387,96 +327,65 @@ export default function Home() {
         </header>
 
         <section className="rounded-2xl border border-[#c9a84c]/30 bg-[#10182b] p-6">
-          <h2 className="text-xl font-semibold text-[#c9a84c]">
-            作品アップロードエリア
-          </h2>
+          <h2 className="text-xl font-semibold text-[#c9a84c]">作品アップロードエリア</h2>
           <div
             onDragOver={(event) => event.preventDefault()}
             onDrop={onDrop}
             className="mt-4 rounded-xl border-2 border-dashed border-[#c9a84c]/60 bg-[#0d1323] p-8 text-center"
           >
-            <p className="text-sm text-[#f3e8c2]">
-              テキストファイルをここにドラッグ＆ドロップ
-            </p>
-            <p className="mt-2 text-xs text-[#b8a97b]">
-              （.txt 推奨 / 複数ファイル対応）
-            </p>
+            <p className="text-sm text-[#f3e8c2]">テキストファイルをここにドラッグ＆ドロップ</p>
+            <p className="mt-2 text-xs text-[#b8a97b]">（.txt 推奨 / 複数ファイル対応）</p>
           </div>
-
-          <div className="mt-4 space-y-2 text-sm">
-            <p className="text-[#e6d9ae]">合計文字数: {totalChars.toLocaleString()} 文字</p>
-            {uploadedFiles.length === 0 ? (
-              <p className="text-[#b8a97b]">まだファイルがアップロードされていません。</p>
-            ) : (
-              <ul className="space-y-2">
-                {uploadedFiles.map((file, index) => (
-                  <li
-                    key={`${file.name}-${index}`}
-                    className="flex items-center justify-between gap-3 rounded-lg border border-[#c9a84c]/30 bg-[#0d1323] px-3 py-2"
-                  >
-                    <span className="min-w-0 truncate">
-                      {file.name} - {file.charCount.toLocaleString()} 文字
-                    </span>
-                    <button
-                      type="button"
-                      aria-label={`${file.name} を一覧から削除`}
-                      onClick={() => void deleteUploadedFile(file.name, index)}
-                      disabled={isDeletingSourceFile}
-                      className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-[#c9a84c]/40 text-sm font-semibold text-[#c9a84c] transition hover:bg-[#c9a84c]/10 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      ×
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+          {isUploading && (
+            <p className="mt-4 text-sm text-[#b8a97b]">
+              {uploadProgress ?? "アップロード処理中..."}
+            </p>
+          )}
+          {!isUploading && uploadError && (
+            <p className="mt-4 text-sm text-[#d8a1a1]">アップロードに失敗しました: {uploadError}</p>
+          )}
         </section>
 
         <section className="rounded-2xl border border-[#c9a84c]/30 bg-[#10182b] p-6">
           <h2 className="text-xl font-semibold text-[#c9a84c]">作品管理</h2>
-          <p className="mt-2 text-sm text-[#b8a97b]">
-            source_file ごとのイベント件数を表示します。
-          </p>
           <div className="mt-3 rounded-xl border border-[#c9a84c]/20 bg-[#0d1323] px-4 py-3 text-sm text-[#e6d9ae]">
             作品数: {sourceFilesSummary.workCount.toLocaleString()}作品 / 累計文字数:{" "}
-            {Math.round(sourceFilesSummary.totalChars).toLocaleString()}文字
+            {sourceFilesSummary.totalChars.toLocaleString()}文字
           </div>
 
           <div className="mt-4 overflow-hidden rounded-xl border border-[#c9a84c]/30 bg-[#0d1323]">
-            <div className="grid grid-cols-[1fr_auto_auto] gap-3 border-b border-[#c9a84c]/20 px-4 py-3 text-xs text-[#b8a97b]">
+            <div className="grid grid-cols-[1fr_auto_auto_auto] gap-3 border-b border-[#c9a84c]/20 px-4 py-3 text-xs text-[#b8a97b]">
               <div>作品名</div>
               <div className="text-right">文字数</div>
-              <div className="text-right">操作</div>
+              <div className="text-right">編集</div>
+              <div className="text-right">削除</div>
             </div>
-
             {isLoadingSourceFiles ? (
-              <div className="px-4 py-4 text-sm text-[#b8a97b]">
-                読み込み中...
-              </div>
+              <div className="px-4 py-4 text-sm text-[#b8a97b]">読み込み中...</div>
             ) : sourceFiles.length === 0 ? (
-              <div className="px-4 py-4 text-sm text-[#b8a97b]">
-                まだ保存された作品がありません。
-              </div>
+              <div className="px-4 py-4 text-sm text-[#b8a97b]">まだ保存された作品がありません。</div>
             ) : (
               <ul className="divide-y divide-[#c9a84c]/10">
                 {sourceFiles.map((row) => (
                   <li
-                    key={row.sourceFile}
-                    className="grid grid-cols-[1fr_auto_auto] items-center gap-3 px-4 py-3"
+                    key={row.source_file}
+                    className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-3 px-4 py-3"
                   >
-                    <div className="min-w-0">
-                      <p className="truncate text-sm text-[#f3e8c2]">
-                        {row.sourceFile}
-                      </p>
-                    </div>
-                    <div className="text-right text-sm text-[#e6d9ae] tabular-nums">
-                      {row.charCount.toLocaleString()}
+                    <p className="truncate text-sm text-[#f3e8c2]">{row.source_file}</p>
+                    <p className="text-right text-sm text-[#e6d9ae]">{row.char_count.toLocaleString()}</p>
+                    <div className="text-right">
+                      <button
+                        type="button"
+                        onClick={() => openEditor(row)}
+                        className="rounded-lg border border-[#c9a84c]/40 bg-transparent px-3 py-1.5 text-xs font-semibold text-[#c9a84c] transition hover:bg-[#c9a84c]/10"
+                      >
+                        編集
+                      </button>
                     </div>
                     <div className="text-right">
                       <button
                         type="button"
-                        onClick={() => void deleteSourceFile(row.sourceFile)}
+                        onClick={() => void deleteWork(row.source_file)}
                         disabled={isDeletingSourceFile}
                         className="rounded-lg border border-[#c9a84c]/40 bg-transparent px-3 py-1.5 text-xs font-semibold text-[#c9a84c] transition hover:bg-[#c9a84c]/10 disabled:cursor-not-allowed disabled:opacity-60"
                       >
@@ -488,36 +397,79 @@ export default function Home() {
               </ul>
             )}
           </div>
-
-          <div className="mt-3 flex items-center justify-between gap-3">
-            <button
-              type="button"
-              onClick={() => void loadSourceFiles()}
-              disabled={isLoadingSourceFiles}
-              className="rounded-lg bg-[#c9a84c] px-4 py-2 text-sm font-semibold text-[#0a0e1a] transition hover:bg-[#d7ba67] disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              一覧を更新
-            </button>
-            {isDeletingSourceFile && (
-              <p className="text-sm text-[#b8a97b]">削除中...</p>
-            )}
-          </div>
         </section>
 
+        {editingOriginalSourceFile && (
+          <section className="rounded-2xl border border-[#c9a84c]/30 bg-[#10182b] p-6">
+            <h2 className="text-xl font-semibold text-[#c9a84c]">作品編集</h2>
+            <div className="mt-4 grid gap-4">
+              <label className="text-sm text-[#e6d9ae]">
+                作品名
+                <input
+                  type="text"
+                  value={editSourceFile}
+                  onChange={(e) => setEditSourceFile(e.target.value)}
+                  className="mt-1 w-full rounded-lg border border-[#c9a84c]/40 bg-[#0d1323] px-3 py-2 text-sm text-[#f3e8c2] outline-none focus:border-[#c9a84c]"
+                />
+              </label>
+
+              <label className="text-sm text-[#e6d9ae]">
+                あらすじ
+                <textarea
+                  value={editSynopsis}
+                  onChange={(e) => setEditSynopsis(e.target.value)}
+                  className="mt-1 min-h-24 w-full rounded-lg border border-[#c9a84c]/40 bg-[#0d1323] px-3 py-2 text-sm text-[#f3e8c2] outline-none focus:border-[#c9a84c]"
+                />
+              </label>
+
+              <label className="text-sm text-[#e6d9ae]">
+                本文（表示のみ）
+                <textarea
+                  value={editContent}
+                  readOnly
+                  className="mt-1 min-h-48 w-full rounded-lg border border-[#c9a84c]/30 bg-[#0d1323] px-3 py-2 text-xs text-[#e6d9ae] opacity-90"
+                />
+              </label>
+
+              <div className="flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={() => void saveWorkMeta()}
+                  disabled={isSavingWork}
+                  className="rounded-lg bg-[#c9a84c] px-4 py-2 text-sm font-semibold text-[#0a0e1a] transition hover:bg-[#d7ba67] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  保存
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void reextractEventsForEditingWork()}
+                  disabled={isReextracting}
+                  className="rounded-lg border border-[#c9a84c]/40 bg-transparent px-4 py-2 text-sm font-semibold text-[#c9a84c] transition hover:bg-[#c9a84c]/10 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  本文からイベント再抽出
+                </button>
+                <button
+                  type="button"
+                  onClick={closeEditor}
+                  className="rounded-lg border border-[#c9a84c]/40 bg-transparent px-4 py-2 text-sm font-semibold text-[#c9a84c] transition hover:bg-[#c9a84c]/10"
+                >
+                  閉じる
+                </button>
+              </div>
+            </div>
+          </section>
+        )}
+
         <section className="rounded-2xl border border-[#c9a84c]/30 bg-[#10182b] p-6">
-          <h2 className="text-xl font-semibold text-[#c9a84c]">
-            年表・因果関係ビューア
-          </h2>
+          <h2 className="text-xl font-semibold text-[#c9a84c]">年表・因果関係ビューア</h2>
           <div className="mt-4 grid gap-4 md:grid-cols-3">
-            {events.map((item) => (
+            {events.map((item, idx) => (
               <article
-                key={`${item.time}-${item.title}`}
+                key={`${item.time}-${item.title}-${idx}`}
                 className="rounded-xl border border-[#c9a84c]/30 bg-[#0d1323] p-4"
               >
                 <p className="text-xs text-[#b8a97b]">{item.time}</p>
-                <p className="mt-2 text-base font-semibold text-[#f3e8c2]">
-                  {item.title}
-                </p>
+                <p className="mt-2 text-base font-semibold text-[#f3e8c2]">{item.title}</p>
                 <dl className="mt-3 space-y-2 text-sm">
                   <div>
                     <dt className="font-medium text-[#c9a84c]">原因</dt>
@@ -535,43 +487,14 @@ export default function Home() {
               </article>
             ))}
           </div>
-          {isExtracting && (
-            <p className="mt-4 text-sm text-[#b8a97b]">Claudeが抽出中です...</p>
-          )}
-          {isExtracting && extractProgress && (
-            <p className="mt-2 text-sm text-[#b8a97b]">{extractProgress}</p>
-          )}
-          {isSavingToDb && (
-            <p className="mt-2 text-sm text-[#b8a97b]">
-              Supabaseへ保存中です...
-            </p>
-          )}
-          {isLoadingFromDb && (
-            <p className="mt-2 text-sm text-[#b8a97b]">
-              Supabaseから読み込み中です...
-            </p>
-          )}
-          {!isExtracting && !isSavingToDb && !isLoadingFromDb && supabaseError && (
-            <p className="mt-4 text-sm text-[#d8a1a1]">
-              Supabaseエラー: {supabaseError}
-            </p>
-          )}
-          {!isExtracting && extractError && (
-            <p className="mt-4 text-sm text-[#d8a1a1]">
-              抽出に失敗しました: {extractError}
-            </p>
-          )}
-          {!isExtracting && events.length === 0 && (
-            <p className="mt-4 text-sm text-[#b8a97b]">
-              まだイベントがありません。テキストをアップロードしてください。
-            </p>
+          {isLoadingEvents && <p className="mt-4 text-sm text-[#b8a97b]">イベントを読み込み中です...</p>}
+          {!isLoadingEvents && events.length === 0 && (
+            <p className="mt-4 text-sm text-[#b8a97b]">まだイベントがありません。</p>
           )}
         </section>
 
         <section className="rounded-2xl border border-[#c9a84c]/30 bg-[#10182b] p-6">
-          <h2 className="text-xl font-semibold text-[#c9a84c]">
-            AIに質問するチャット欄
-          </h2>
+          <h2 className="text-xl font-semibold text-[#c9a84c]">AIに質問するチャット欄</h2>
           <form onSubmit={onSubmitQuestion} className="mt-4 flex flex-col gap-3">
             <label htmlFor="question" className="text-sm text-[#e6d9ae]">
               例: フェブスタークはいつ記憶を失ったか？
@@ -595,6 +518,8 @@ export default function Home() {
             {chatAnswer}
           </div>
         </section>
+
+        {supabaseError && <p className="text-sm text-[#d8a1a1]">Supabaseエラー: {supabaseError}</p>}
       </main>
     </div>
   );
