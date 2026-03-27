@@ -59,6 +59,7 @@ export default function Home() {
   );
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractError, setExtractError] = useState<string | null>(null);
+  const [extractProgress, setExtractProgress] = useState<string | null>(null);
   const [supabaseError, setSupabaseError] = useState<string | null>(null);
   const [isLoadingFromDb, setIsLoadingFromDb] = useState(false);
   const [isSavingToDb, setIsSavingToDb] = useState(false);
@@ -82,40 +83,44 @@ export default function Home() {
       .sort((a, b) => a.localeCompare(b, "ja"))
       .join(",");
 
+  const loadEventsFromDb = async (isCancelled?: () => boolean) => {
+    if (isCancelled?.()) return;
+    setIsLoadingFromDb(true);
+    setSupabaseError(null);
+
+    const { data, error } = await supabase
+      .from("events")
+      .select("id,time,title,cause,event,result,created_at")
+      .order("created_at", { ascending: false })
+      .limit(200);
+
+    if (isCancelled?.()) return;
+    if (error) {
+      setSupabaseError(error.message);
+      setIsLoadingFromDb(false);
+      return;
+    }
+
+    const rows = (data ?? []) as DbEventRow[];
+    if (isCancelled?.()) return;
+    setEvents(
+      rows.map(({ time, title, cause, event, result }) => ({
+        time,
+        title,
+        cause,
+        event,
+        result,
+      }))
+    );
+
+    if (isCancelled?.()) return;
+    setIsLoadingFromDb(false);
+  };
+
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
-      setIsLoadingFromDb(true);
-      setSupabaseError(null);
-
-      const { data, error } = await supabase
-        .from("events")
-        .select("id,time,title,cause,event,result,created_at")
-        .order("created_at", { ascending: false })
-        .limit(200);
-
-      if (cancelled) return;
-
-      if (error) {
-        setSupabaseError(error.message);
-        setIsLoadingFromDb(false);
-        return;
-      }
-
-      const rows = (data ?? []) as DbEventRow[];
-      if (rows.length > 0) {
-        setEvents(
-          rows.map(({ time, title, cause, event, result }) => ({
-            time,
-            title,
-            cause,
-            event,
-            result,
-          }))
-        );
-      }
-
-      setIsLoadingFromDb(false);
+      await loadEventsFromDb(() => cancelled);
     };
 
     void load();
@@ -183,6 +188,30 @@ export default function Home() {
     setIsDeletingSourceFile(false);
   };
 
+  const deleteUploadedFile = async (fileName: string, index: number) => {
+    const trimmed = fileName.trim();
+    if (!trimmed) return;
+
+    setIsDeletingSourceFile(true);
+    setSupabaseError(null);
+
+    const { error } = await supabase
+      .from("events")
+      .delete()
+      .eq("source_file", trimmed);
+
+    if (error) {
+      setSupabaseError(error.message);
+      setIsDeletingSourceFile(false);
+      return;
+    }
+
+    setUploadedFiles((prev) => prev.filter((_, i) => i !== index));
+    await loadSourceFiles();
+    await loadEventsFromDb();
+    setIsDeletingSourceFile(false);
+  };
+
   const saveEventsToDb = async (newEvents: EventCard[], sourceFile: string) => {
     setIsSavingToDb(true);
     setSupabaseError(null);
@@ -229,14 +258,12 @@ export default function Home() {
 
     if (isExtracting) return;
     setExtractError(null);
+    setExtractProgress(null);
     setIsExtracting(true);
 
     try {
       const fileArray = Array.from(files);
       const fileTexts = await Promise.all(fileArray.map((file) => file.text()));
-      const sourceFile = normalizeSourceFile(
-        fileArray.map((f) => f.name).join(",")
-      );
 
       const fileInfos: UploadedFileInfo[] = fileArray.map((file, idx) => ({
         name: file.name,
@@ -245,40 +272,46 @@ export default function Home() {
 
       setUploadedFiles((prev) => [...prev, ...fileInfos]);
 
-      // MVP: 応答速度とトークン量を考慮して、先頭のみ送る
+      // MVP: 応答速度とトークン量を考慮して、先頭のみ送る（ファイルごと）
       const MAX_INPUT_CHARS = 20000;
-      const combinedText = fileTexts.join("\n\n");
-      const textForClaude =
-        combinedText.length > MAX_INPUT_CHARS
-          ? combinedText.slice(0, MAX_INPUT_CHARS)
-          : combinedText;
 
-      const res = await fetch("/api/extract", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: textForClaude }),
-      });
+      for (let i = 0; i < fileArray.length; i++) {
+        const file = fileArray[i];
+        const sourceFile = file.name.trim();
+        const rawText = fileTexts[i] ?? "";
+        const textForClaude =
+          rawText.length > MAX_INPUT_CHARS ? rawText.slice(0, MAX_INPUT_CHARS) : rawText;
 
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => null);
-        throw new Error(
-          errBody?.error ? String(errBody.error) : `HTTP ${res.status}`
-        );
+        setExtractProgress(`${sourceFile} を処理中...`);
+
+        const res = await fetch("/api/extract", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: textForClaude }),
+        });
+
+        if (!res.ok) {
+          const errBody = await res.json().catch(() => null);
+          throw new Error(
+            errBody?.error ? String(errBody.error) : `HTTP ${res.status}`
+          );
+        }
+
+        const data = (await res.json()) as { events?: EventCard[] };
+        const extractedEvents = Array.isArray(data.events) ? data.events : [];
+
+        if (extractedEvents.length > 0) {
+          await saveEventsToDb(extractedEvents, sourceFile);
+        }
       }
 
-      const data = (await res.json()) as { events?: EventCard[] };
-      const extractedEvents = Array.isArray(data.events) ? data.events : [];
-      setEvents(extractedEvents);
-
-      if (extractedEvents.length > 0) {
-        await saveEventsToDb(extractedEvents, sourceFile);
-      } else {
-        await loadSourceFiles();
-      }
+      await loadEventsFromDb();
+      await loadSourceFiles();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setExtractError(message);
     } finally {
+      setExtractProgress(null);
       setIsExtracting(false);
     }
   };
@@ -336,9 +369,20 @@ export default function Home() {
                 {uploadedFiles.map((file, index) => (
                   <li
                     key={`${file.name}-${index}`}
-                    className="rounded-lg border border-[#c9a84c]/30 bg-[#0d1323] px-3 py-2"
+                    className="flex items-center justify-between gap-3 rounded-lg border border-[#c9a84c]/30 bg-[#0d1323] px-3 py-2"
                   >
-                    {file.name} - {file.charCount.toLocaleString()} 文字
+                    <span className="min-w-0 truncate">
+                      {file.name} - {file.charCount.toLocaleString()} 文字
+                    </span>
+                    <button
+                      type="button"
+                      aria-label={`${file.name} を一覧から削除`}
+                      onClick={() => void deleteUploadedFile(file.name, index)}
+                      disabled={isDeletingSourceFile}
+                      className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-[#c9a84c]/40 text-sm font-semibold text-[#c9a84c] transition hover:bg-[#c9a84c]/10 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      ×
+                    </button>
                   </li>
                 ))}
               </ul>
@@ -446,6 +490,9 @@ export default function Home() {
           </div>
           {isExtracting && (
             <p className="mt-4 text-sm text-[#b8a97b]">Claudeが抽出中です...</p>
+          )}
+          {isExtracting && extractProgress && (
+            <p className="mt-2 text-sm text-[#b8a97b]">{extractProgress}</p>
           )}
           {isSavingToDb && (
             <p className="mt-2 text-sm text-[#b8a97b]">
