@@ -23,8 +23,8 @@ type DbEventRow = EventCard & {
 };
 
 type SourceFileSummary = {
-  source_file: string | null;
-  char_count: number | null;
+  source_file: string;
+  char_count: number;
 };
 
 const initialEvents: EventCard[] = [
@@ -65,7 +65,7 @@ export default function Home() {
   const [isLoadingFromDb, setIsLoadingFromDb] = useState(false);
   const [isSavingToDb, setIsSavingToDb] = useState(false);
   const [sourceFiles, setSourceFiles] = useState<
-    { displayName: string; count: number; totalChars: number; deleteSourceFile: string }[]
+    { sourceFile: string; charCount: number }[]
   >([]);
   const [isLoadingSourceFiles, setIsLoadingSourceFiles] = useState(false);
   const [isDeletingSourceFile, setIsDeletingSourceFile] = useState(false);
@@ -77,12 +77,8 @@ export default function Home() {
 
   const sourceFilesSummary = useMemo(() => {
     const workCount = sourceFiles.length;
-    const totalEvents = sourceFiles.reduce((sum, row) => sum + (row.count ?? 0), 0);
-    const totalChars = sourceFiles.reduce(
-      (sum, row) => sum + (Number.isFinite(row.totalChars) ? row.totalChars : 0),
-      0
-    );
-    return { workCount, totalEvents, totalChars };
+    const totalChars = sourceFiles.reduce((sum, row) => sum + row.charCount, 0);
+    return { workCount, totalChars };
   }, [sourceFiles]);
 
   const normalizeSourceFile = (sourceFile: string) =>
@@ -152,9 +148,8 @@ export default function Home() {
     setSupabaseError(null);
 
     const { data, error } = await supabase
-      .from("events")
+      .from("source_files")
       .select("source_file,char_count")
-      .not("source_file", "is", null)
       .order("source_file", { ascending: true });
 
     if (error) {
@@ -164,59 +159,13 @@ export default function Home() {
     }
 
     const rows = (data ?? []) as SourceFileSummary[];
-
-    // まずは「元の source_file 文字列」単位で件数を集計
-    const perOriginal = new Map<string, { count: number; charCountSum: number }>();
-    for (const row of rows) {
-      const original = String(row.source_file ?? "").trim();
-      if (!original) continue;
-      const prev = perOriginal.get(original) ?? { count: 0, charCountSum: 0 };
-      perOriginal.set(original, {
-        count: prev.count + 1,
-        charCountSum: prev.charCountSum + Number(row.char_count ?? 0),
-      });
-    }
-
-    // 表示は、カンマ区切りなら分割して個別行として並べる（件数は分割数で割る）
-    const displayRows: {
-      displayName: string;
-      count: number;
-      totalChars: number;
-      deleteSourceFile: string;
-    }[] = [];
-
-    for (const [original, dataBySource] of perOriginal.entries()) {
-      const parts = original
-        .split(",")
-        .map((p) => p.trim())
-        .filter(Boolean);
-
-      const n = parts.length > 0 ? parts.length : 1;
-      const perWork = dataBySource.count / n;
-      const perWorkChars = dataBySource.charCountSum / n;
-
-      if (parts.length === 0) {
-        displayRows.push({
-          displayName: original,
-          count: dataBySource.count,
-          totalChars: dataBySource.charCountSum,
-          deleteSourceFile: original,
-        });
-        continue;
-      }
-
-      for (const part of parts) {
-        displayRows.push({
-          displayName: part,
-          count: perWork,
-          totalChars: perWorkChars,
-          deleteSourceFile: original,
-        });
-      }
-    }
-
     setSourceFiles(
-      displayRows.sort((a, b) => a.displayName.localeCompare(b.displayName, "ja"))
+      rows
+        .filter((row) => row.source_file.trim().length > 0)
+        .map((row) => ({
+          sourceFile: row.source_file.trim(),
+          charCount: Number(row.char_count ?? 0),
+        }))
     );
 
     setIsLoadingSourceFiles(false);
@@ -244,6 +193,17 @@ export default function Home() {
       return;
     }
 
+    const { error: sourceFileError } = await supabase
+      .from("source_files")
+      .delete()
+      .eq("source_file", trimmed);
+
+    if (sourceFileError) {
+      setSupabaseError(sourceFileError.message);
+      setIsDeletingSourceFile(false);
+      return;
+    }
+
     await loadSourceFiles();
     setIsDeletingSourceFile(false);
   };
@@ -266,17 +226,24 @@ export default function Home() {
       return;
     }
 
+    const { error: sourceFileError } = await supabase
+      .from("source_files")
+      .delete()
+      .eq("source_file", trimmed);
+
+    if (sourceFileError) {
+      setSupabaseError(sourceFileError.message);
+      setIsDeletingSourceFile(false);
+      return;
+    }
+
     setUploadedFiles((prev) => prev.filter((_, i) => i !== index));
     await loadSourceFiles();
     await loadEventsFromDb();
     setIsDeletingSourceFile(false);
   };
 
-  const saveEventsToDb = async (
-    newEvents: EventCard[],
-    sourceFile: string,
-    charCount: number
-  ) => {
+  const saveEventsToDb = async (newEvents: EventCard[], sourceFile: string) => {
     setIsSavingToDb(true);
     setSupabaseError(null);
 
@@ -301,7 +268,6 @@ export default function Home() {
     const { error } = await supabase.from("events").insert(
       newEvents.map((e) => ({
         source_file: trimmedSourceFile,
-        char_count: charCount,
         time: e.time,
         title: e.title,
         cause: e.cause,
@@ -367,7 +333,18 @@ export default function Home() {
         const extractedEvents = Array.isArray(data.events) ? data.events : [];
 
         if (extractedEvents.length > 0) {
-          await saveEventsToDb(extractedEvents, sourceFile, sourceFileCharCount);
+          const { error: upsertSourceFileError } = await supabase
+            .from("source_files")
+            .upsert(
+              { source_file: sourceFile, char_count: sourceFileCharCount },
+              { onConflict: "source_file" }
+            );
+
+          if (upsertSourceFileError) {
+            throw new Error(upsertSourceFileError.message);
+          }
+
+          await saveEventsToDb(extractedEvents, sourceFile);
         }
       }
 
@@ -462,15 +439,14 @@ export default function Home() {
             source_file ごとのイベント件数を表示します。
           </p>
           <div className="mt-3 rounded-xl border border-[#c9a84c]/20 bg-[#0d1323] px-4 py-3 text-sm text-[#e6d9ae]">
-            作品数: {sourceFilesSummary.workCount.toLocaleString()}作品 / 累計イベント数:{" "}
-            {formatMaybeDecimal(sourceFilesSummary.totalEvents)}件 / 累計文字数:{" "}
+            作品数: {sourceFilesSummary.workCount.toLocaleString()}作品 / 累計文字数:{" "}
             {Math.round(sourceFilesSummary.totalChars).toLocaleString()}文字
           </div>
 
           <div className="mt-4 overflow-hidden rounded-xl border border-[#c9a84c]/30 bg-[#0d1323]">
             <div className="grid grid-cols-[1fr_auto_auto] gap-3 border-b border-[#c9a84c]/20 px-4 py-3 text-xs text-[#b8a97b]">
               <div>作品名</div>
-              <div className="text-right">件数</div>
+              <div className="text-right">文字数</div>
               <div className="text-right">操作</div>
             </div>
 
@@ -484,23 +460,23 @@ export default function Home() {
               </div>
             ) : (
               <ul className="divide-y divide-[#c9a84c]/10">
-                {sourceFiles.map((row, idx) => (
+                {sourceFiles.map((row) => (
                   <li
-                    key={`${row.deleteSourceFile}::${row.displayName}::${idx}`}
+                    key={row.sourceFile}
                     className="grid grid-cols-[1fr_auto_auto] items-center gap-3 px-4 py-3"
                   >
                     <div className="min-w-0">
                       <p className="truncate text-sm text-[#f3e8c2]">
-                        {row.displayName}
+                        {row.sourceFile}
                       </p>
                     </div>
                     <div className="text-right text-sm text-[#e6d9ae] tabular-nums">
-                      {formatMaybeDecimal(row.count)}
+                      {row.charCount.toLocaleString()}
                     </div>
                     <div className="text-right">
                       <button
                         type="button"
-                        onClick={() => void deleteSourceFile(row.deleteSourceFile)}
+                        onClick={() => void deleteSourceFile(row.sourceFile)}
                         disabled={isDeletingSourceFile}
                         className="rounded-lg border border-[#c9a84c]/40 bg-transparent px-3 py-1.5 text-xs font-semibold text-[#c9a84c] transition hover:bg-[#c9a84c]/10 disabled:cursor-not-allowed disabled:opacity-60"
                       >
