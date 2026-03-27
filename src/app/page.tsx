@@ -64,7 +64,7 @@ export default function Home() {
   const [isLoadingFromDb, setIsLoadingFromDb] = useState(false);
   const [isSavingToDb, setIsSavingToDb] = useState(false);
   const [sourceFiles, setSourceFiles] = useState<
-    { sourceFile: string; count: number }[]
+    { displayName: string; count: number; deleteSourceFile: string }[]
   >([]);
   const [isLoadingSourceFiles, setIsLoadingSourceFiles] = useState(false);
   const [isDeletingSourceFile, setIsDeletingSourceFile] = useState(false);
@@ -82,6 +82,13 @@ export default function Home() {
       .filter((name, index, arr) => arr.indexOf(name) === index)
       .sort((a, b) => a.localeCompare(b, "ja"))
       .join(",");
+
+  const formatMaybeDecimal = (value: number) =>
+    Number.isFinite(value)
+      ? Number.isInteger(value)
+        ? value.toLocaleString()
+        : value.toFixed(1)
+      : "0";
 
   const loadEventsFromDb = async (isCancelled?: () => boolean) => {
     if (isCancelled?.()) return;
@@ -146,17 +153,48 @@ export default function Home() {
     }
 
     const rows = (data ?? []) as SourceFileSummary[];
-    const counter = new Map<string, number>();
+
+    // まずは「元の source_file 文字列」単位で件数を集計
+    const perOriginal = new Map<string, number>();
     for (const row of rows) {
-      const key = normalizeSourceFile((row.source_file ?? "").trim());
-      if (!key) continue;
-      counter.set(key, (counter.get(key) ?? 0) + 1);
+      const original = String(row.source_file ?? "").trim();
+      if (!original) continue;
+      perOriginal.set(original, (perOriginal.get(original) ?? 0) + 1);
+    }
+
+    // 表示は、カンマ区切りなら分割して個別行として並べる（件数は分割数で割る）
+    const displayRows: { displayName: string; count: number; deleteSourceFile: string }[] =
+      [];
+
+    for (const [original, count] of perOriginal.entries()) {
+      const parts = original
+        .split(",")
+        .map((p) => p.trim())
+        .filter(Boolean);
+
+      const n = parts.length > 0 ? parts.length : 1;
+      const perWork = count / n;
+
+      if (parts.length === 0) {
+        displayRows.push({
+          displayName: original,
+          count,
+          deleteSourceFile: original,
+        });
+        continue;
+      }
+
+      for (const part of parts) {
+        displayRows.push({
+          displayName: part,
+          count: perWork,
+          deleteSourceFile: original,
+        });
+      }
     }
 
     setSourceFiles(
-      Array.from(counter.entries())
-        .map(([sourceFile, count]) => ({ sourceFile, count }))
-        .sort((a, b) => a.sourceFile.localeCompare(b.sourceFile, "ja"))
+      displayRows.sort((a, b) => a.displayName.localeCompare(b.displayName, "ja"))
     );
 
     setIsLoadingSourceFiles(false);
@@ -413,23 +451,23 @@ export default function Home() {
               </div>
             ) : (
               <ul className="divide-y divide-[#c9a84c]/10">
-                {sourceFiles.map((row) => (
+                {sourceFiles.map((row, idx) => (
                   <li
-                    key={row.sourceFile}
+                    key={`${row.deleteSourceFile}::${row.displayName}::${idx}`}
                     className="grid grid-cols-[1fr_auto_auto] items-center gap-3 px-4 py-3"
                   >
                     <div className="min-w-0">
                       <p className="truncate text-sm text-[#f3e8c2]">
-                        {row.sourceFile}
+                        {row.displayName}
                       </p>
                     </div>
                     <div className="text-right text-sm text-[#e6d9ae] tabular-nums">
-                      {row.count.toLocaleString()}
+                      {formatMaybeDecimal(row.count)}
                     </div>
                     <div className="text-right">
                       <button
                         type="button"
-                        onClick={() => void deleteSourceFile(row.sourceFile)}
+                        onClick={() => void deleteSourceFile(row.deleteSourceFile)}
                         disabled={isDeletingSourceFile}
                         className="rounded-lg border border-[#c9a84c]/40 bg-transparent px-3 py-1.5 text-xs font-semibold text-[#c9a84c] transition hover:bg-[#c9a84c]/10 disabled:cursor-not-allowed disabled:opacity-60"
                       >
