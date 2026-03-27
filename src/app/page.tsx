@@ -1,6 +1,7 @@
 "use client";
 
-import { DragEvent, FormEvent, useMemo, useState } from "react";
+import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { supabase } from "@/lib/supabase";
 
 type UploadedFileInfo = {
   name: string;
@@ -13,6 +14,11 @@ type EventCard = {
   cause: string;
   event: string;
   result: string;
+};
+
+type DbEventRow = EventCard & {
+  id: string;
+  created_at: string;
 };
 
 const initialEvents: EventCard[] = [
@@ -48,11 +54,77 @@ export default function Home() {
   );
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractError, setExtractError] = useState<string | null>(null);
+  const [supabaseError, setSupabaseError] = useState<string | null>(null);
+  const [isLoadingFromDb, setIsLoadingFromDb] = useState(false);
+  const [isSavingToDb, setIsSavingToDb] = useState(false);
 
   const totalChars = useMemo(
     () => uploadedFiles.reduce((sum, file) => sum + file.charCount, 0),
     [uploadedFiles]
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      setIsLoadingFromDb(true);
+      setSupabaseError(null);
+
+      const { data, error } = await supabase
+        .from("events")
+        .select("id,time,title,cause,event,result,created_at")
+        .order("created_at", { ascending: false })
+        .limit(200);
+
+      if (cancelled) return;
+
+      if (error) {
+        setSupabaseError(error.message);
+        setIsLoadingFromDb(false);
+        return;
+      }
+
+      const rows = (data ?? []) as DbEventRow[];
+      if (rows.length > 0) {
+        setEvents(
+          rows.map(({ time, title, cause, event, result }) => ({
+            time,
+            title,
+            cause,
+            event,
+            result,
+          }))
+        );
+      }
+
+      setIsLoadingFromDb(false);
+    };
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const saveEventsToDb = async (newEvents: EventCard[]) => {
+    setIsSavingToDb(true);
+    setSupabaseError(null);
+
+    const { error } = await supabase.from("events").insert(
+      newEvents.map((e) => ({
+        time: e.time,
+        title: e.title,
+        cause: e.cause,
+        event: e.event,
+        result: e.result,
+      }))
+    );
+
+    if (error) {
+      setSupabaseError(error.message);
+    }
+
+    setIsSavingToDb(false);
+  };
 
   const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -96,6 +168,7 @@ export default function Home() {
       const data = (await res.json()) as { events?: EventCard[] };
       if (Array.isArray(data.events) && data.events.length > 0) {
         setEvents(data.events);
+        await saveEventsToDb(data.events);
       } else {
         setEvents([]);
       }
@@ -203,6 +276,21 @@ export default function Home() {
           </div>
           {isExtracting && (
             <p className="mt-4 text-sm text-[#b8a97b]">Claudeが抽出中です...</p>
+          )}
+          {isSavingToDb && (
+            <p className="mt-2 text-sm text-[#b8a97b]">
+              Supabaseへ保存中です...
+            </p>
+          )}
+          {isLoadingFromDb && (
+            <p className="mt-2 text-sm text-[#b8a97b]">
+              Supabaseから読み込み中です...
+            </p>
+          )}
+          {!isExtracting && !isSavingToDb && !isLoadingFromDb && supabaseError && (
+            <p className="mt-4 text-sm text-[#d8a1a1]">
+              Supabaseエラー: {supabaseError}
+            </p>
           )}
           {!isExtracting && extractError && (
             <p className="mt-4 text-sm text-[#d8a1a1]">
