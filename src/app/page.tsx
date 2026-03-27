@@ -24,6 +24,7 @@ type DbEventRow = EventCard & {
 
 type SourceFileSummary = {
   source_file: string | null;
+  char_count: number | null;
 };
 
 const initialEvents: EventCard[] = [
@@ -64,7 +65,7 @@ export default function Home() {
   const [isLoadingFromDb, setIsLoadingFromDb] = useState(false);
   const [isSavingToDb, setIsSavingToDb] = useState(false);
   const [sourceFiles, setSourceFiles] = useState<
-    { displayName: string; count: number; deleteSourceFile: string }[]
+    { displayName: string; count: number; totalChars: number; deleteSourceFile: string }[]
   >([]);
   const [isLoadingSourceFiles, setIsLoadingSourceFiles] = useState(false);
   const [isDeletingSourceFile, setIsDeletingSourceFile] = useState(false);
@@ -73,6 +74,16 @@ export default function Home() {
     () => uploadedFiles.reduce((sum, file) => sum + file.charCount, 0),
     [uploadedFiles]
   );
+
+  const sourceFilesSummary = useMemo(() => {
+    const workCount = sourceFiles.length;
+    const totalEvents = sourceFiles.reduce((sum, row) => sum + (row.count ?? 0), 0);
+    const totalChars = sourceFiles.reduce(
+      (sum, row) => sum + (Number.isFinite(row.totalChars) ? row.totalChars : 0),
+      0
+    );
+    return { workCount, totalEvents, totalChars };
+  }, [sourceFiles]);
 
   const normalizeSourceFile = (sourceFile: string) =>
     sourceFile
@@ -142,7 +153,7 @@ export default function Home() {
 
     const { data, error } = await supabase
       .from("events")
-      .select("source_file")
+      .select("source_file,char_count")
       .not("source_file", "is", null)
       .order("source_file", { ascending: true });
 
@@ -155,30 +166,40 @@ export default function Home() {
     const rows = (data ?? []) as SourceFileSummary[];
 
     // まずは「元の source_file 文字列」単位で件数を集計
-    const perOriginal = new Map<string, number>();
+    const perOriginal = new Map<string, { count: number; charCountSum: number }>();
     for (const row of rows) {
       const original = String(row.source_file ?? "").trim();
       if (!original) continue;
-      perOriginal.set(original, (perOriginal.get(original) ?? 0) + 1);
+      const prev = perOriginal.get(original) ?? { count: 0, charCountSum: 0 };
+      perOriginal.set(original, {
+        count: prev.count + 1,
+        charCountSum: prev.charCountSum + Number(row.char_count ?? 0),
+      });
     }
 
     // 表示は、カンマ区切りなら分割して個別行として並べる（件数は分割数で割る）
-    const displayRows: { displayName: string; count: number; deleteSourceFile: string }[] =
-      [];
+    const displayRows: {
+      displayName: string;
+      count: number;
+      totalChars: number;
+      deleteSourceFile: string;
+    }[] = [];
 
-    for (const [original, count] of perOriginal.entries()) {
+    for (const [original, dataBySource] of perOriginal.entries()) {
       const parts = original
         .split(",")
         .map((p) => p.trim())
         .filter(Boolean);
 
       const n = parts.length > 0 ? parts.length : 1;
-      const perWork = count / n;
+      const perWork = dataBySource.count / n;
+      const perWorkChars = dataBySource.charCountSum / n;
 
       if (parts.length === 0) {
         displayRows.push({
           displayName: original,
-          count,
+          count: dataBySource.count,
+          totalChars: dataBySource.charCountSum,
           deleteSourceFile: original,
         });
         continue;
@@ -188,6 +209,7 @@ export default function Home() {
         displayRows.push({
           displayName: part,
           count: perWork,
+          totalChars: perWorkChars,
           deleteSourceFile: original,
         });
       }
@@ -250,7 +272,11 @@ export default function Home() {
     setIsDeletingSourceFile(false);
   };
 
-  const saveEventsToDb = async (newEvents: EventCard[], sourceFile: string) => {
+  const saveEventsToDb = async (
+    newEvents: EventCard[],
+    sourceFile: string,
+    charCount: number
+  ) => {
     setIsSavingToDb(true);
     setSupabaseError(null);
 
@@ -275,6 +301,7 @@ export default function Home() {
     const { error } = await supabase.from("events").insert(
       newEvents.map((e) => ({
         source_file: trimmedSourceFile,
+        char_count: charCount,
         time: e.time,
         title: e.title,
         cause: e.cause,
@@ -317,6 +344,7 @@ export default function Home() {
         const file = fileArray[i];
         const sourceFile = file.name.trim();
         const rawText = fileTexts[i] ?? "";
+        const sourceFileCharCount = rawText.length;
         const textForClaude =
           rawText.length > MAX_INPUT_CHARS ? rawText.slice(0, MAX_INPUT_CHARS) : rawText;
 
@@ -339,7 +367,7 @@ export default function Home() {
         const extractedEvents = Array.isArray(data.events) ? data.events : [];
 
         if (extractedEvents.length > 0) {
-          await saveEventsToDb(extractedEvents, sourceFile);
+          await saveEventsToDb(extractedEvents, sourceFile, sourceFileCharCount);
         }
       }
 
@@ -433,6 +461,11 @@ export default function Home() {
           <p className="mt-2 text-sm text-[#b8a97b]">
             source_file ごとのイベント件数を表示します。
           </p>
+          <div className="mt-3 rounded-xl border border-[#c9a84c]/20 bg-[#0d1323] px-4 py-3 text-sm text-[#e6d9ae]">
+            作品数: {sourceFilesSummary.workCount.toLocaleString()}作品 / 累計イベント数:{" "}
+            {formatMaybeDecimal(sourceFilesSummary.totalEvents)}件 / 累計文字数:{" "}
+            {Math.round(sourceFilesSummary.totalChars).toLocaleString()}文字
+          </div>
 
           <div className="mt-4 overflow-hidden rounded-xl border border-[#c9a84c]/30 bg-[#0d1323]">
             <div className="grid grid-cols-[1fr_auto_auto] gap-3 border-b border-[#c9a84c]/20 px-4 py-3 text-xs text-[#b8a97b]">
