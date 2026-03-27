@@ -72,6 +72,9 @@ export async function POST(req: Request): Promise<Response> {
 - title は出来事の短い題名
 - cause / event / result はそれぞれ原文の内容を要約した文章
 
+必ず以下のJSON形式のみで返答してください。説明文は不要です：
+{"events":[{"time":"...","title":"...","cause":"...","event":"...","result":"..."}]}
+
 --- テキスト ---
 ${body.text}
 `.trim();
@@ -87,12 +90,6 @@ ${body.text}
           content: userPrompt,
         },
       ],
-      output_config: {
-        format: {
-          type: "json_schema",
-          schema,
-        },
-      },
     });
 
     const textBlock = response.content.find(
@@ -106,7 +103,13 @@ ${body.text}
       );
     }
 
-    const parsed = JSON.parse(textBlock.text) as ExtractResponse;
+    const sanitized = textBlock.text
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/\s*```\s*$/i, "")
+      .trim();
+
+    const parsed = JSON.parse(sanitized) as ExtractResponse;
     if (!parsed || !Array.isArray(parsed.events)) {
       return Response.json(
         { error: "Claude returned invalid JSON shape." },

@@ -1,7 +1,8 @@
 "use client";
 
+import * as React from "react";
 import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { supabase } from "../lib/supabase";
 
 type UploadedFileInfo = {
   name: string;
@@ -105,12 +106,31 @@ export default function Home() {
     };
   }, []);
 
-  const saveEventsToDb = async (newEvents: EventCard[]) => {
+  const saveEventsToDb = async (newEvents: EventCard[], sourceFile: string) => {
     setIsSavingToDb(true);
     setSupabaseError(null);
 
+    const trimmedSourceFile = sourceFile.trim();
+    if (!trimmedSourceFile) {
+      setSupabaseError("source_file is required to save events.");
+      setIsSavingToDb(false);
+      return;
+    }
+
+    const { error: deleteError } = await supabase
+      .from("events")
+      .delete()
+      .eq("source_file", trimmedSourceFile);
+
+    if (deleteError) {
+      setSupabaseError(deleteError.message);
+      setIsSavingToDb(false);
+      return;
+    }
+
     const { error } = await supabase.from("events").insert(
       newEvents.map((e) => ({
+        source_file: trimmedSourceFile,
         time: e.time,
         title: e.title,
         cause: e.cause,
@@ -136,6 +156,7 @@ export default function Home() {
     try {
       const fileArray = Array.from(files);
       const fileTexts = await Promise.all(fileArray.map((file) => file.text()));
+      const sourceFile = fileArray.map((f) => f.name).join(",");
 
       const fileInfos: UploadedFileInfo[] = fileArray.map((file, idx) => ({
         name: file.name,
@@ -168,7 +189,7 @@ export default function Home() {
       const data = (await res.json()) as { events?: EventCard[] };
       if (Array.isArray(data.events) && data.events.length > 0) {
         setEvents(data.events);
-        await saveEventsToDb(data.events);
+        await saveEventsToDb(data.events, sourceFile);
       } else {
         setEvents([]);
       }
