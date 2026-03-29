@@ -18,6 +18,13 @@ type ExtractedCharacter = {
   abilities_summary: string;
 };
 
+type ExtractedRelationship = {
+  from_name: string;
+  to_name: string;
+  relation_type: string;
+  summary: string;
+};
+
 type ExtractedFaction = {
   name: string;
   faction_kind: string;
@@ -31,6 +38,7 @@ type AnalyzeResult = {
   synopsis: string | null;
   characters: ExtractedCharacter[];
   factions: ExtractedFaction[];
+  relationships: ExtractedRelationship[];
 };
 
 function createSupabaseServer() {
@@ -133,6 +141,23 @@ function parseAnalyzeResult(rawText: string): AnalyzeResult | null {
     }
   }
 
+  const relationships: ExtractedRelationship[] = [];
+  if (Array.isArray(o.relationships)) {
+    for (const item of o.relationships) {
+      if (!item || typeof item !== "object") continue;
+      const r = item as Record<string, unknown>;
+      const from_name = typeof r.from_name === "string" ? r.from_name.trim() : "";
+      const to_name = typeof r.to_name === "string" ? r.to_name.trim() : "";
+      if (!from_name || !to_name) continue;
+      relationships.push({
+        from_name,
+        to_name,
+        relation_type: typeof r.relation_type === "string" ? r.relation_type.trim() : "other",
+        summary: typeof r.summary === "string" ? r.summary.trim() : "",
+      });
+    }
+  }
+
   return {
     display_title,
     era_primary,
@@ -140,6 +165,7 @@ function parseAnalyzeResult(rawText: string): AnalyzeResult | null {
     synopsis,
     characters,
     factions,
+    relationships,
   };
 }
 
@@ -223,6 +249,14 @@ ${textForModel}
       "faction_kind": "nation | religion | guild | military | clan | company | other のいずれか",
       "description": "勢力の概要"
     }
+  ],
+  "relationships": [
+    {
+      "from_name": "キャラクター名A",
+      "to_name": "キャラクター名B",
+      "relation_type": "家族 | 友人 | 恋人 | 師弟 | 敵対 | 主従 | 協力 | その他 のいずれか",
+      "summary": "関係の説明（1〜2文）"
+    }
   ]
 }
 `.trim();
@@ -281,6 +315,7 @@ ${textForModel}
 
     const storyId = storyUpsert.id as string;
 
+    const factionIdsInOrder: string[] = [];
     for (const fac of parsed.factions) {
       const slug = stableSlug("f", sourceFile, fac.name);
       const { data: facRow, error: facErr } = await supabase
@@ -303,6 +338,37 @@ ${textForModel}
         console.error("[api/analyze-story] factions upsert:", facErr);
         return Response.json(
           { error: "Failed to save faction.", detail: facErr?.message },
+          { status: 500 }
+        );
+      }
+      factionIdsInOrder.push(facRow.id as string);
+    }
+
+    const { error: delSfErr } = await supabase
+      .from("story_factions")
+      .delete()
+      .eq("story_id", storyId);
+
+    if (delSfErr) {
+      console.error("[api/analyze-story] story_factions delete:", delSfErr);
+      return Response.json(
+        { error: "Failed to reset story_factions.", detail: delSfErr.message },
+        { status: 500 }
+      );
+    }
+
+    let facSortKey = 0;
+    for (const factionId of factionIdsInOrder) {
+      const { error: sfInsErr } = await supabase.from("story_factions").insert({
+        story_id: storyId,
+        faction_id: factionId,
+        role_in_story: null,
+        sort_key: facSortKey++,
+      });
+      if (sfInsErr) {
+        console.error("[api/analyze-story] story_factions insert:", sfInsErr);
+        return Response.json(
+          { error: "Failed to link story_factions.", detail: sfInsErr.message },
           { status: 500 }
         );
       }
@@ -379,12 +445,42 @@ ${textForModel}
       }
     }
 
+    const charIdsForRelCleanup = Array.from(characterIdBySlug.values());
+    if (charIdsForRelCleanup.length > 0) {
+      const { error: delCrErr } = await supabase
+        .from("character_relationships")
+        .delete()
+        .in("from_character_id", charIdsForRelCleanup);
+      if (delCrErr) {
+        console.error("[api/analyze-story] character_relationships delete:", delCrErr);
+      }
+    }
+
+    for (const rel of parsed.relationships) {
+      const fromSlug = stableSlug("c", sourceFile, rel.from_name);
+      const toSlug = stableSlug("c", sourceFile, rel.to_name);
+      const fromId = characterIdBySlug.get(fromSlug);
+      const toId = characterIdBySlug.get(toSlug);
+      if (!fromId || !toId) continue;
+      const { error: crErr } = await supabase.from("character_relationships").insert({
+        from_character_id: fromId,
+        to_character_id: toId,
+        relation_type: rel.relation_type,
+        summary: rel.summary || null,
+        valid_from_era_label: parsed.era_primary ?? null,
+      });
+      if (crErr) {
+        console.error("[api/analyze-story] character_relationships insert:", crErr);
+      }
+    }
+
     return Response.json({
       ok: true,
       source_file: sourceFile,
       story_id: storyId,
       factions_saved: parsed.factions.length,
       characters_saved: parsed.characters.length,
+      relationships_saved: parsed.relationships.length,
       truncated,
     });
   } catch (err) {
