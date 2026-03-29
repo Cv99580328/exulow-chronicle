@@ -6,11 +6,13 @@ import { extractUploadedFileText } from "../lib/extractFileText";
 import { supabase } from "../lib/supabase";
 
 type EventCard = {
+  id: string;
   time: string;
   title: string;
   cause: string;
   event: string;
   result: string;
+  next_event_ids: string[];
 };
 
 type SourceFileRow = {
@@ -28,6 +30,7 @@ type WorldHistoryEra = {
   label: string;
   sortKey: number;
   events: EventCard[];
+  ordered: EventCard[];
 };
 
 function isUnknownTime(time: string): boolean {
@@ -62,6 +65,7 @@ function buildWorldHistoryEras(eventsList: EventCard[]): WorldHistoryEra[] {
     label,
     sortKey: eraSortKey(label),
     events: evs,
+    ordered: topoSortSameEra(evs),
   }));
   buckets.sort((a, b) => a.sortKey - b.sortKey);
   if (unknown.length > 0) {
@@ -69,9 +73,67 @@ function buildWorldHistoryEras(eventsList: EventCard[]): WorldHistoryEra[] {
       label: "不明",
       sortKey: Number.MAX_SAFE_INTEGER,
       events: unknown,
+      ordered: topoSortSameEra(unknown),
     });
   }
   return buckets;
+}
+
+/** 同一時代内の next_event_ids だけでトポロジカル順（閉路はタイトル順で後置） */
+function topoSortSameEra(eraEvents: EventCard[]): EventCard[] {
+  if (eraEvents.length <= 1) return [...eraEvents];
+  const ids = new Set(eraEvents.map((e) => e.id));
+  const byId = new Map(eraEvents.map((e) => [e.id, e] as const));
+  const inDegree = new Map<string, number>();
+  const adj = new Map<string, string[]>();
+  for (const e of eraEvents) {
+    inDegree.set(e.id, 0);
+    adj.set(e.id, []);
+  }
+  for (const e of eraEvents) {
+    for (const nid of e.next_event_ids ?? []) {
+      if (nid === e.id || !ids.has(nid)) continue;
+      adj.get(e.id)!.push(nid);
+      inDegree.set(nid, (inDegree.get(nid) ?? 0) + 1);
+    }
+  }
+  const sortQueue = (q: string[]) => {
+    q.sort((a, b) => byId.get(a)!.title.localeCompare(byId.get(b)!.title, "ja"));
+  };
+  const queue: string[] = [];
+  for (const [id, d] of inDegree) {
+    if (d === 0) queue.push(id);
+  }
+  sortQueue(queue);
+  const out: EventCard[] = [];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    const node = byId.get(id);
+    if (node) out.push(node);
+    for (const n of adj.get(id) ?? []) {
+      const nd = (inDegree.get(n) ?? 0) - 1;
+      inDegree.set(n, nd);
+      if (nd === 0) {
+        queue.push(n);
+        sortQueue(queue);
+      }
+    }
+  }
+  const seen = new Set(out.map((e) => e.id));
+  const rest = eraEvents.filter((e) => !seen.has(e.id));
+  rest.sort((a, b) => a.title.localeCompare(b.title, "ja"));
+  return [...out, ...rest];
+}
+
+function crossEraNextEvents(ev: EventCard, eventById: Map<string, EventCard>): EventCard[] {
+  const my = ev.time.trim();
+  const out: EventCard[] = [];
+  for (const nid of ev.next_event_ids ?? []) {
+    const t = eventById.get(nid);
+    if (!t) continue;
+    if (t.time.trim() !== my) out.push(t);
+  }
+  return out;
 }
 
 function worldHistoryCardClass(time: string): string {
@@ -107,6 +169,7 @@ export default function Home() {
   const [selectedWorks, setSelectedWorks] = useState<Record<string, boolean>>({});
   const [isBulkExtracting, setIsBulkExtracting] = useState(false);
   const [bulkExtractProgress, setBulkExtractProgress] = useState<string | null>(null);
+  const [isLinkingEvents, setIsLinkingEvents] = useState(false);
 
   const [editingOriginalSourceFile, setEditingOriginalSourceFile] = useState<string | null>(
     null
@@ -130,6 +193,12 @@ export default function Home() {
   }, [sourceFiles]);
 
   const worldHistoryEras = useMemo(() => buildWorldHistoryEras(events), [events]);
+
+  const eventById = useMemo(() => {
+    const m = new Map<string, EventCard>();
+    for (const e of events) m.set(e.id, e);
+    return m;
+  }, [events]);
 
   const loadSourceFiles = async () => {
     setIsLoadingSourceFiles(true);
@@ -156,7 +225,7 @@ export default function Home() {
 
     const { data, error } = await supabase
       .from("events")
-      .select("source_file,time,title,cause,event,result")
+      .select("id,source_file,time,title,cause,event,result,next_event_ids")
       .order("time", { ascending: true });
 
     if (error) {
@@ -165,17 +234,37 @@ export default function Home() {
       return;
     }
 
-    const rows = (data ?? []) as EventDbRow[];
+    const rows = (data ?? []) as (EventDbRow & {
+      id: string;
+      next_event_ids: string[] | null;
+    })[];
     setEvents(
       rows.map((row) => ({
+        id: row.id,
         time: row.time,
         title: row.title,
         cause: row.cause,
         event: row.event,
         result: row.result,
+        next_event_ids: Array.isArray(row.next_event_ids) ? row.next_event_ids : [],
       }))
     );
     setIsLoadingEvents(false);
+  };
+
+  const runLinkEvents = async () => {
+    const res = await fetch("/api/link-events", { method: "POST" });
+    const body = (await res.json().catch(() => null)) as { error?: string; detail?: string } | null;
+    if (!res.ok) {
+      const msg =
+        body?.error && body?.detail
+          ? `${body.error} (${body.detail})`
+          : body?.error
+            ? String(body.error)
+            : `HTTP ${res.status}`;
+      throw new Error(msg);
+    }
+    await loadEvents();
   };
 
   useEffect(() => {
@@ -241,7 +330,9 @@ export default function Home() {
       throw new Error(errBody?.error ? String(errBody.error) : `HTTP ${res.status}`);
     }
 
-    const data = (await res.json()) as { events?: EventCard[] };
+    const data = (await res.json()) as {
+      events?: Array<Pick<EventCard, "time" | "title" | "cause" | "event" | "result">>;
+    };
     const extractedEvents = Array.isArray(data.events) ? data.events : [];
 
     const { error: deleteError } = await supabase
@@ -423,6 +514,15 @@ export default function Home() {
       await extractAndSaveEvents(currentName, text);
 
       await loadEvents();
+      setIsLinkingEvents(true);
+      try {
+        await runLinkEvents();
+      } catch (linkErr) {
+        const message = linkErr instanceof Error ? linkErr.message : String(linkErr);
+        setSupabaseError(message);
+      } finally {
+        setIsLinkingEvents(false);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setSupabaseError(message);
@@ -442,6 +542,16 @@ export default function Home() {
         await extractAndSaveEvents(row.source_file, row.content ?? "");
       }
       await loadEvents();
+      setBulkExtractProgress("因果リンクを推定中...");
+      setIsLinkingEvents(true);
+      try {
+        await runLinkEvents();
+      } catch (linkErr) {
+        const message = linkErr instanceof Error ? linkErr.message : String(linkErr);
+        setSupabaseError(message);
+      } finally {
+        setIsLinkingEvents(false);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setSupabaseError(message);
@@ -748,7 +858,7 @@ export default function Home() {
           <div className="mt-4 grid gap-4 md:grid-cols-3">
             {events.map((item, idx) => (
               <article
-                key={`${item.time}-${item.title}-${idx}`}
+                key={item.id || `${item.time}-${item.title}-${idx}`}
                 className="rounded-xl border border-[#c9a84c]/30 bg-[#0d1323] p-4"
               >
                 <p className="text-xs text-[#b8a97b]">{item.time}</p>
@@ -779,10 +889,35 @@ export default function Home() {
 
         {activeTab === "world" && (
         <section className="rounded-2xl border border-[#c9a84c]/30 bg-[#10182b] p-6">
-          <h2 className="text-xl font-semibold text-[#c9a84c]">世界史ビュー</h2>
-          <p className="mt-2 text-sm leading-relaxed text-[#b8a97b]">
-            縦軸は時代（古いほど上）。同時代の出来事は横に因果連鎖（実線→）。時代をまたぐ接続は点線です。
-          </p>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h2 className="text-xl font-semibold text-[#c9a84c]">世界史ビュー</h2>
+              <p className="mt-2 text-sm leading-relaxed text-[#b8a97b]">
+                縦軸は時代（古いほど上）。同時代は DB の next_event_ids に基づき実線→。時代をまたぐリンクはカード下の ⇢ 表記と、時代間の点線です。
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={isLinkingEvents || isLoadingEvents}
+              onClick={() => {
+                setSupabaseError(null);
+                setIsLinkingEvents(true);
+                void (async () => {
+                  try {
+                    await runLinkEvents();
+                  } catch (err) {
+                    const message = err instanceof Error ? err.message : String(err);
+                    setSupabaseError(message);
+                  } finally {
+                    setIsLinkingEvents(false);
+                  }
+                })();
+              }}
+              className="shrink-0 rounded-lg border border-[#c9a84c]/50 bg-[#c9a84c]/15 px-4 py-2 text-sm font-semibold text-[#c9a84c] transition hover:bg-[#c9a84c]/25 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isLinkingEvents ? "因果関係を更新中..." : "因果関係を更新"}
+            </button>
+          </div>
 
           {isLoadingEvents && (
             <p className="mt-4 text-sm text-[#b8a97b]">イベントを読み込み中です...</p>
@@ -799,27 +934,49 @@ export default function Home() {
                       <p className="text-sm font-semibold leading-snug text-[#c9a84c]">{era.label}</p>
                     </div>
                     <div className="min-w-0 flex-1 overflow-x-auto pb-1">
-                      <div className="flex min-h-[5.5rem] flex-wrap items-center gap-y-2 md:flex-nowrap">
-                        {era.events.map((ev, evIdx) => (
-                          <React.Fragment key={`${era.label}-${ev.title}-${evIdx}`}>
-                            {evIdx > 0 && (
-                              <span
-                                className="mx-1 shrink-0 select-none text-lg font-semibold text-[#c9a84c]"
-                                aria-hidden
-                              >
-                                →
-                              </span>
-                            )}
-                            <article
-                              className={`min-w-[10rem] max-w-xs shrink-0 rounded-xl border px-3 py-2.5 shadow-[0_0_12px_rgba(201,168,76,0.08)] ${worldHistoryCardClass(ev.time)}`}
-                            >
-                              <p className="text-sm font-semibold leading-snug">{ev.title}</p>
-                              <p className="mt-1 line-clamp-3 text-xs leading-relaxed opacity-90">
-                                {ev.cause?.trim() ? ev.cause : ev.event}
-                              </p>
-                            </article>
-                          </React.Fragment>
-                        ))}
+                      <div className="flex min-h-[5.5rem] flex-wrap items-start gap-y-3 md:flex-nowrap md:items-center">
+                        {era.ordered.map((ev, evIdx) => {
+                          const prev = evIdx > 0 ? era.ordered[evIdx - 1] : null;
+                          const showSolid =
+                            prev != null && (prev.next_event_ids ?? []).includes(ev.id);
+                          const crossNext = crossEraNextEvents(ev, eventById);
+                          return (
+                            <React.Fragment key={ev.id}>
+                              {evIdx > 0 && (
+                                <span
+                                  className={`mx-1 shrink-0 select-none text-lg font-semibold ${
+                                    showSolid ? "text-[#c9a84c]" : "text-[#c9a84c]/25"
+                                  }`}
+                                  aria-hidden
+                                >
+                                  {showSolid ? "→" : "·"}
+                                </span>
+                              )}
+                              <div className="flex max-w-xs shrink-0 flex-col gap-1">
+                                <article
+                                  className={`min-w-[10rem] max-w-full rounded-xl border px-3 py-2.5 shadow-[0_0_12px_rgba(201,168,76,0.08)] ${worldHistoryCardClass(ev.time)}`}
+                                >
+                                  <p className="text-sm font-semibold leading-snug">{ev.title}</p>
+                                  <p className="mt-1 line-clamp-3 text-xs leading-relaxed opacity-90">
+                                    {ev.cause?.trim() ? ev.cause : ev.event}
+                                  </p>
+                                </article>
+                                {crossNext.length > 0 && (
+                                  <p className="max-w-full pl-1 text-[10px] leading-snug text-[#b8a97b]/90">
+                                    {crossNext.map((t) => (
+                                      <span key={t.id} className="mr-2 inline-block">
+                                        <span className="text-[#c9a84c]/80" aria-hidden>
+                                          ⇢{" "}
+                                        </span>
+                                        {t.title}
+                                      </span>
+                                    ))}
+                                  </p>
+                                )}
+                              </div>
+                            </React.Fragment>
+                          );
+                        })}
                       </div>
                     </div>
                   </div>
