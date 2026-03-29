@@ -120,6 +120,9 @@ export default function Home() {
     "ここにAIの回答が表示されます。まずは世界観について質問してみてください。"
   );
 
+  type AppTab = "works" | "causal" | "world" | "characters";
+  const [activeTab, setActiveTab] = useState<AppTab>("works");
+
   const sourceFilesSummary = useMemo(() => {
     const workCount = sourceFiles.length;
     const totalChars = sourceFiles.reduce((sum, row) => sum + Number(row.char_count ?? 0), 0);
@@ -486,7 +489,7 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-[#0a0e1a] text-[#f3e8c2]">
-      <main className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 py-10 md:px-8">
+      <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-4 py-10 md:px-8">
         <header className="rounded-2xl border border-[#c9a84c]/40 bg-[#10182b] p-6 shadow-[0_0_24px_rgba(201,168,76,0.12)]">
           <h1 className="text-3xl font-bold tracking-wide text-[#c9a84c]">
             エクスロー・クロニクル
@@ -496,6 +499,39 @@ export default function Home() {
           </p>
         </header>
 
+        <nav
+          className="mt-6 flex flex-wrap gap-1 border-b border-[#c9a84c]/35"
+          role="tablist"
+          aria-label="メインコンテンツ"
+        >
+          {(
+            [
+              ["works", "作品管理"],
+              ["causal", "因果関係"],
+              ["world", "世界史ビュー"],
+              ["characters", "登場人物"],
+            ] as const
+          ).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === id}
+              onClick={() => setActiveTab(id)}
+              className={`rounded-t-lg px-4 py-2.5 text-sm font-semibold transition ${
+                activeTab === id
+                  ? "border-b-2 border-[#c9a84c] bg-[#c9a84c]/12 text-[#c9a84c] shadow-[0_-2px_16px_rgba(201,168,76,0.12)]"
+                  : "border-b-2 border-transparent text-[#b8a97b] hover:bg-[#c9a84c]/5 hover:text-[#e6d9ae]"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="mt-6 flex flex-1 flex-col gap-8">
+        {activeTab === "works" && (
+          <>
         <section className="rounded-2xl border border-[#c9a84c]/30 bg-[#10182b] p-6">
           <h2 className="text-xl font-semibold text-[#c9a84c]">作品アップロードエリア</h2>
           <div
@@ -643,7 +679,7 @@ export default function Home() {
           </div>
         </section>
 
-        {editingOriginalSourceFile && (
+        {activeTab === "works" && editingOriginalSourceFile && (
           <section className="rounded-2xl border border-[#c9a84c]/30 bg-[#10182b] p-6">
             <h2 className="text-xl font-semibold text-[#c9a84c]">作品編集</h2>
             <div className="mt-4 grid gap-4">
@@ -703,7 +739,10 @@ export default function Home() {
             </div>
           </section>
         )}
+          </>
+        )}
 
+        {activeTab === "causal" && (
         <section className="rounded-2xl border border-[#c9a84c]/30 bg-[#10182b] p-6">
           <h2 className="text-xl font-semibold text-[#c9a84c]">年表・因果関係ビューア</h2>
           <div className="mt-4 grid gap-4 md:grid-cols-3">
@@ -736,7 +775,9 @@ export default function Home() {
             <p className="mt-4 text-sm text-[#b8a97b]">まだイベントがありません。</p>
           )}
         </section>
+        )}
 
+        {activeTab === "world" && (
         <section className="rounded-2xl border border-[#c9a84c]/30 bg-[#10182b] p-6">
           <h2 className="text-xl font-semibold text-[#c9a84c]">世界史ビュー</h2>
           <p className="mt-2 text-sm leading-relaxed text-[#b8a97b]">
@@ -799,8 +840,17 @@ export default function Home() {
             </div>
           )}
         </section>
+        )}
 
-        <section className="rounded-2xl border border-[#c9a84c]/30 bg-[#10182b] p-6">
+        {activeTab === "characters" && (
+          <section className="rounded-2xl border border-[#c9a84c]/30 bg-[#10182b] p-6">
+            <h2 className="text-xl font-semibold text-[#c9a84c]">登場人物</h2>
+            <p className="mt-4 text-sm text-[#b8a97b]">準備中</p>
+          </section>
+        )}
+        </div>
+
+        <section className="mt-auto shrink-0 border-t border-[#c9a84c]/25 bg-[#0a0e1a]/95 pt-8">
           <h2 className="text-xl font-semibold text-[#c9a84c]">AIに質問するチャット欄</h2>
           <form onSubmit={onSubmitQuestion} className="mt-4 flex flex-col gap-3">
             <label htmlFor="question" className="text-sm text-[#e6d9ae]">
