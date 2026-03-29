@@ -24,6 +24,73 @@ type EventDbRow = EventCard & {
   source_file: string;
 };
 
+type WorldHistoryEra = {
+  label: string;
+  sortKey: number;
+  events: EventCard[];
+};
+
+function isUnknownTime(time: string): boolean {
+  return time.trim() === "不明";
+}
+
+/** 小さいほど古い（画面上は上）。不明は最下段で別処理 */
+function eraSortKey(time: string): number {
+  const t = time.trim();
+  if (isUnknownTime(t)) return Number.MAX_SAFE_INTEGER;
+  if (t.includes("現在")) return 0;
+  const mMan = t.match(/(\d+(?:\.\d+)?)\s*万年前/);
+  if (mMan) return -parseFloat(mMan[1]) * 10000;
+  const mNen = t.match(/(\d+)\s*年前/);
+  if (mNen) return -parseInt(mNen[1], 10);
+  return 100;
+}
+
+function buildWorldHistoryEras(eventsList: EventCard[]): WorldHistoryEra[] {
+  const known = new Map<string, EventCard[]>();
+  const unknown: EventCard[] = [];
+  for (const e of eventsList) {
+    if (isUnknownTime(e.time)) {
+      unknown.push(e);
+    } else {
+      const k = e.time.trim();
+      if (!known.has(k)) known.set(k, []);
+      known.get(k)!.push(e);
+    }
+  }
+  const buckets: WorldHistoryEra[] = [...known.entries()].map(([label, evs]) => ({
+    label,
+    sortKey: eraSortKey(label),
+    events: evs,
+  }));
+  buckets.sort((a, b) => a.sortKey - b.sortKey);
+  if (unknown.length > 0) {
+    buckets.push({
+      label: "不明",
+      sortKey: Number.MAX_SAFE_INTEGER,
+      events: unknown,
+    });
+  }
+  return buckets;
+}
+
+function worldHistoryCardClass(time: string): string {
+  const t = time.trim();
+  if (isUnknownTime(t)) {
+    return "border-gray-500/50 bg-gray-900/50 text-[#e6d9ae]";
+  }
+  if (t.includes("万年前")) {
+    return "border-sky-500/45 bg-sky-950/45 text-[#e0f2fe]";
+  }
+  if (t.includes("年前")) {
+    return "border-emerald-500/45 bg-emerald-950/40 text-[#d1fae5]";
+  }
+  if (t.includes("現在")) {
+    return "border-[#c9a84c]/55 bg-[#1a1508]/80 text-[#f3e8c2]";
+  }
+  return "border-[#c9a84c]/35 bg-[#0d1323] text-[#f3e8c2]";
+}
+
 export default function Home() {
   const [events, setEvents] = useState<EventCard[]>([]);
   const [sourceFiles, setSourceFiles] = useState<SourceFileRow[]>([]);
@@ -58,6 +125,8 @@ export default function Home() {
     const totalChars = sourceFiles.reduce((sum, row) => sum + Number(row.char_count ?? 0), 0);
     return { workCount, totalChars };
   }, [sourceFiles]);
+
+  const worldHistoryEras = useMemo(() => buildWorldHistoryEras(events), [events]);
 
   const loadSourceFiles = async () => {
     setIsLoadingSourceFiles(true);
@@ -665,6 +734,69 @@ export default function Home() {
           {isLoadingEvents && <p className="mt-4 text-sm text-[#b8a97b]">イベントを読み込み中です...</p>}
           {!isLoadingEvents && events.length === 0 && (
             <p className="mt-4 text-sm text-[#b8a97b]">まだイベントがありません。</p>
+          )}
+        </section>
+
+        <section className="rounded-2xl border border-[#c9a84c]/30 bg-[#10182b] p-6">
+          <h2 className="text-xl font-semibold text-[#c9a84c]">世界史ビュー</h2>
+          <p className="mt-2 text-sm leading-relaxed text-[#b8a97b]">
+            縦軸は時代（古いほど上）。同時代の出来事は横に因果連鎖（実線→）。時代をまたぐ接続は点線です。
+          </p>
+
+          {isLoadingEvents && (
+            <p className="mt-4 text-sm text-[#b8a97b]">イベントを読み込み中です...</p>
+          )}
+          {!isLoadingEvents && worldHistoryEras.length === 0 && (
+            <p className="mt-4 text-sm text-[#b8a97b]">表示するイベントがありません。</p>
+          )}
+          {!isLoadingEvents && worldHistoryEras.length > 0 && (
+            <div className="mt-6 space-y-0">
+              {worldHistoryEras.map((era, eraIdx) => (
+                <div key={era.label + eraIdx}>
+                  <div className="flex flex-col gap-3 md:flex-row md:items-stretch md:gap-0">
+                    <div className="flex w-full shrink-0 items-start border-b border-[#c9a84c]/25 pb-2 md:w-36 md:border-b-0 md:border-r md:border-[#c9a84c]/25 md:pb-0 md:pr-4">
+                      <p className="text-sm font-semibold leading-snug text-[#c9a84c]">{era.label}</p>
+                    </div>
+                    <div className="min-w-0 flex-1 overflow-x-auto pb-1">
+                      <div className="flex min-h-[5.5rem] flex-wrap items-center gap-y-2 md:flex-nowrap">
+                        {era.events.map((ev, evIdx) => (
+                          <React.Fragment key={`${era.label}-${ev.title}-${evIdx}`}>
+                            {evIdx > 0 && (
+                              <span
+                                className="mx-1 shrink-0 select-none text-lg font-semibold text-[#c9a84c]"
+                                aria-hidden
+                              >
+                                →
+                              </span>
+                            )}
+                            <article
+                              className={`min-w-[10rem] max-w-xs shrink-0 rounded-xl border px-3 py-2.5 shadow-[0_0_12px_rgba(201,168,76,0.08)] ${worldHistoryCardClass(ev.time)}`}
+                            >
+                              <p className="text-sm font-semibold leading-snug">{ev.title}</p>
+                              <p className="mt-1 line-clamp-3 text-xs leading-relaxed opacity-90">
+                                {ev.cause?.trim() ? ev.cause : ev.event}
+                              </p>
+                            </article>
+                          </React.Fragment>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                  {eraIdx < worldHistoryEras.length - 1 && (
+                    <div
+                      className="my-5 flex items-center gap-2 md:ml-36"
+                      aria-hidden
+                    >
+                      <div className="h-0 min-w-[2rem] flex-1 border-t-2 border-dashed border-[#c9a84c]/40" />
+                      <span className="shrink-0 text-lg font-medium text-[#c9a84c]/90" title="時代をまたぐ因果">
+                        ⇢
+                      </span>
+                      <div className="h-0 min-w-[2rem] flex-1 border-t-2 border-dashed border-[#c9a84c]/40" />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
           )}
         </section>
 
