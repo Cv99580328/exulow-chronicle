@@ -136,6 +136,31 @@ function crossEraNextEvents(ev: EventCard, eventById: Map<string, EventCard>): E
   return out;
 }
 
+/** 時代をまたぐ因果用：カード下の縦点線＋下向き矢印（SVG） */
+function WorldHistoryVerticalCrossEraArrow() {
+  return (
+    <div
+      className="pointer-events-none flex h-11 w-full shrink-0 justify-center pt-0.5"
+      aria-hidden
+    >
+      <svg width="20" height="44" viewBox="0 0 20 44" className="overflow-visible">
+        <line
+          x1="10"
+          y1="0"
+          x2="10"
+          y2="28"
+          stroke="#c9a84c"
+          strokeWidth="1.75"
+          strokeDasharray="5 4"
+          strokeLinecap="round"
+          opacity={0.78}
+        />
+        <path d="M10 40 L5.5 30 L14.5 30 Z" fill="#c9a84c" opacity={0.82} />
+      </svg>
+    </div>
+  );
+}
+
 function worldHistoryCardClass(time: string): string {
   const t = time.trim();
   if (isUnknownTime(t)) {
@@ -170,6 +195,8 @@ export default function Home() {
   const [isBulkExtracting, setIsBulkExtracting] = useState(false);
   const [bulkExtractProgress, setBulkExtractProgress] = useState<string | null>(null);
   const [isLinkingEvents, setIsLinkingEvents] = useState(false);
+  const [analyzedStorySources, setAnalyzedStorySources] = useState<string[]>([]);
+  const [storyAnalyzeBusy, setStoryAnalyzeBusy] = useState<string | null>(null);
 
   const [editingOriginalSourceFile, setEditingOriginalSourceFile] = useState<string | null>(
     null
@@ -199,6 +226,11 @@ export default function Home() {
     for (const e of events) m.set(e.id, e);
     return m;
   }, [events]);
+
+  const analyzedStorySet = useMemo(
+    () => new Set(analyzedStorySources),
+    [analyzedStorySources]
+  );
 
   const loadSourceFiles = async () => {
     setIsLoadingSourceFiles(true);
@@ -252,6 +284,49 @@ export default function Home() {
     setIsLoadingEvents(false);
   };
 
+  const loadAnalyzedStories = async () => {
+    const { data, error } = await supabase.from("stories").select("source_file");
+    if (error) {
+      console.warn("[page] stories select:", error.message);
+      setAnalyzedStorySources([]);
+      return;
+    }
+    const rows = (data ?? []) as { source_file: string }[];
+    setAnalyzedStorySources(rows.map((r) => r.source_file));
+  };
+
+  const runAnalyzeStory = async (sourceFile: string) => {
+    const key = sourceFile.trim();
+    if (!key) return;
+    setStoryAnalyzeBusy(key);
+    setSupabaseError(null);
+    try {
+      const res = await fetch("/api/analyze-story", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source_file: key }),
+      });
+      const body = (await res.json().catch(() => null)) as {
+        error?: string;
+        detail?: string;
+      } | null;
+      if (!res.ok) {
+        const msg = body?.detail
+          ? `${body.error ?? "Error"} (${body.detail})`
+          : body?.error
+            ? String(body.error)
+            : `HTTP ${res.status}`;
+        throw new Error(msg);
+      }
+      setAnalyzedStorySources((prev) => (prev.includes(key) ? prev : [...prev, key]));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setSupabaseError(message);
+    } finally {
+      setStoryAnalyzeBusy(null);
+    }
+  };
+
   const runLinkEvents = async () => {
     const res = await fetch("/api/link-events", { method: "POST" });
     const body = (await res.json().catch(() => null)) as { error?: string; detail?: string } | null;
@@ -270,6 +345,7 @@ export default function Home() {
   useEffect(() => {
     void loadSourceFiles();
     void loadEvents();
+    void loadAnalyzedStories();
   }, []);
 
   useEffect(() => {
@@ -442,6 +518,7 @@ export default function Home() {
 
     await loadSourceFiles();
     await loadEvents();
+    await loadAnalyzedStories();
     setIsDeletingSourceFile(false);
   };
 
@@ -729,10 +806,11 @@ export default function Home() {
           )}
 
           <div className="mt-4 overflow-hidden rounded-xl border border-[#c9a84c]/30 bg-[#0d1323]">
-            <div className="grid grid-cols-[auto_1fr_auto_auto_auto] gap-3 border-b border-[#c9a84c]/20 px-4 py-3 text-xs text-[#b8a97b]">
+            <div className="grid grid-cols-[auto_1fr_auto_auto_auto_auto] gap-3 border-b border-[#c9a84c]/20 px-4 py-3 text-xs text-[#b8a97b]">
               <div className="w-8 shrink-0" aria-hidden />
               <div>作品名</div>
               <div className="text-right">文字数</div>
+              <div className="text-center">詳細分析</div>
               <div className="text-right">編集</div>
               <div className="text-right">削除</div>
             </div>
@@ -745,7 +823,7 @@ export default function Home() {
                 {sourceFiles.map((row) => (
                   <li
                     key={row.source_file}
-                    className="grid grid-cols-[auto_1fr_auto_auto_auto] items-center gap-3 px-4 py-3"
+                    className="grid grid-cols-[auto_1fr_auto_auto_auto_auto] items-center gap-3 px-4 py-3"
                   >
                     <input
                       type="checkbox"
@@ -760,8 +838,25 @@ export default function Home() {
                       className="h-4 w-4 shrink-0 rounded border-[#c9a84c]/50 bg-[#0d1323] text-[#c9a84c] accent-[#c9a84c] disabled:opacity-50"
                       aria-label={`${row.source_file} を選択`}
                     />
-                    <p className="min-w-0 truncate text-sm text-[#f3e8c2]">{row.source_file}</p>
+                    <div className="flex min-w-0 items-center gap-2">
+                      <p className="min-w-0 truncate text-sm text-[#f3e8c2]">{row.source_file}</p>
+                      {analyzedStorySet.has(row.source_file) && (
+                        <span className="shrink-0 whitespace-nowrap text-xs font-medium text-emerald-400/90">
+                          ✓分析済み
+                        </span>
+                      )}
+                    </div>
                     <p className="text-right text-sm text-[#e6d9ae]">{row.char_count.toLocaleString()}</p>
+                    <div className="flex justify-center">
+                      <button
+                        type="button"
+                        onClick={() => void runAnalyzeStory(row.source_file)}
+                        disabled={isBulkExtracting || storyAnalyzeBusy !== null}
+                        className="rounded-lg border border-[#c9a84c]/40 bg-transparent px-2.5 py-1.5 text-xs font-semibold text-[#c9a84c] transition hover:bg-[#c9a84c]/10 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {storyAnalyzeBusy === row.source_file ? "分析中…" : "詳細分析"}
+                      </button>
+                    </div>
                     <div className="text-right">
                       <button
                         type="button"
@@ -893,7 +988,9 @@ export default function Home() {
             <div>
               <h2 className="text-xl font-semibold text-[#c9a84c]">世界史ビュー</h2>
               <p className="mt-2 text-sm leading-relaxed text-[#b8a97b]">
-                縦軸は時代（古いほど上）。同時代は DB の next_event_ids に基づき実線→。時代をまたぐリンクはカード下の ⇢ 表記と、時代間の点線です。
+                {
+                  "縦軸は時代（古いほど上）。同一時代内の next_event_ids は横の実線矢印（→）で接続。異なる時代へのリンクはカード下に「⇢ タイトル」形式の行と、縦の点線矢印（SVG）を表示します。"
+                }
               </p>
             </div>
             <button
@@ -934,7 +1031,7 @@ export default function Home() {
                       <p className="text-sm font-semibold leading-snug text-[#c9a84c]">{era.label}</p>
                     </div>
                     <div className="min-w-0 flex-1 overflow-x-auto pb-1">
-                      <div className="flex min-h-[5.5rem] flex-wrap items-start gap-y-3 md:flex-nowrap md:items-center">
+                      <div className="flex min-h-[5.5rem] flex-wrap items-end gap-y-4 md:flex-nowrap md:items-end">
                         {era.ordered.map((ev, evIdx) => {
                           const prev = evIdx > 0 ? era.ordered[evIdx - 1] : null;
                           const showSolid =
@@ -952,7 +1049,7 @@ export default function Home() {
                                   {showSolid ? "→" : "·"}
                                 </span>
                               )}
-                              <div className="flex max-w-xs shrink-0 flex-col gap-1">
+                              <div className="flex max-w-xs shrink-0 flex-col items-stretch gap-0">
                                 <article
                                   className={`min-w-[10rem] max-w-full rounded-xl border px-3 py-2.5 shadow-[0_0_12px_rgba(201,168,76,0.08)] ${worldHistoryCardClass(ev.time)}`}
                                 >
@@ -962,16 +1059,22 @@ export default function Home() {
                                   </p>
                                 </article>
                                 {crossNext.length > 0 && (
-                                  <p className="max-w-full pl-1 text-[10px] leading-snug text-[#b8a97b]/90">
-                                    {crossNext.map((t) => (
-                                      <span key={t.id} className="mr-2 inline-block">
-                                        <span className="text-[#c9a84c]/80" aria-hidden>
-                                          ⇢{" "}
-                                        </span>
-                                        {t.title}
-                                      </span>
-                                    ))}
-                                  </p>
+                                  <div className="mt-1.5 w-full border-t border-dashed border-[#c9a84c]/25 pt-1.5">
+                                    <div className="space-y-1 pl-0.5">
+                                      {crossNext.map((t) => (
+                                        <p
+                                          key={t.id}
+                                          className="text-[10px] leading-snug text-[#e6d9ae]/95"
+                                        >
+                                          <span className="font-medium text-[#c9a84c]" aria-hidden>
+                                            ⇢{" "}
+                                          </span>
+                                          {t.title}
+                                        </p>
+                                      ))}
+                                    </div>
+                                    <WorldHistoryVerticalCrossEraArrow />
+                                  </div>
                                 )}
                               </div>
                             </React.Fragment>
@@ -982,15 +1085,9 @@ export default function Home() {
                   </div>
                   {eraIdx < worldHistoryEras.length - 1 && (
                     <div
-                      className="my-5 flex items-center gap-2 md:ml-36"
+                      className="my-2 border-t border-dashed border-[#c9a84c]/20 md:ml-36"
                       aria-hidden
-                    >
-                      <div className="h-0 min-w-[2rem] flex-1 border-t-2 border-dashed border-[#c9a84c]/40" />
-                      <span className="shrink-0 text-lg font-medium text-[#c9a84c]/90" title="時代をまたぐ因果">
-                        ⇢
-                      </span>
-                      <div className="h-0 min-w-[2rem] flex-1 border-t-2 border-dashed border-[#c9a84c]/40" />
-                    </div>
+                    />
                   )}
                 </div>
               ))}
