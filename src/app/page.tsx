@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { extractUploadedFileText } from "../lib/extractFileText";
 import { supabase } from "../lib/supabase";
 
 type EventCard = {
@@ -213,7 +214,7 @@ export default function Home() {
 
         let rawText: string;
         try {
-          rawText = await file.text();
+          rawText = await extractUploadedFileText(file);
         } catch {
           failedNames.push(displayName);
           continue;
@@ -434,7 +435,9 @@ export default function Home() {
             className="mt-4 rounded-xl border-2 border-dashed border-[#c9a84c]/60 bg-[#0d1323] p-8 text-center"
           >
             <p className="text-sm text-[#f3e8c2]">テキストファイルをここにドラッグ＆ドロップ</p>
-            <p className="mt-2 text-xs text-[#b8a97b]">（.txt 推奨 / 複数ファイル対応）</p>
+            <p className="mt-2 text-xs text-[#b8a97b]">
+              （.txt / .docx / .doc / .pdf 対応・複数ファイル可）
+            </p>
           </div>
           {isUploading && (
             <p className="mt-4 text-sm text-[#b8a97b]">
