@@ -35,6 +35,7 @@ export default function Home() {
   const [isReextracting, setIsReextracting] = useState(false);
   const [supabaseError, setSupabaseError] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadFailedFiles, setUploadFailedFiles] = useState<string[]>([]);
   const [selectedWorks, setSelectedWorks] = useState<Record<string, boolean>>({});
   const [isBulkExtracting, setIsBulkExtracting] = useState(false);
   const [bulkExtractProgress, setBulkExtractProgress] = useState<string | null>(null);
@@ -124,20 +125,32 @@ export default function Home() {
     });
   }, [sourceFiles]);
 
-  const upsertSourceFile = async (sourceFile: string, content: string) => {
-    const trimmed = sourceFile.trim();
-    if (!trimmed) return;
+  /** DBの source_file キー用。全角記号などはそのまま維持し、NUL・パス区切りのみ除去・NFC正規化 */
+  const sanitizeSourceFileKey = (raw: string, fallbackIndex: number): string => {
+    let s = raw.normalize("NFC").trim().replace(/\0/g, "");
+    s = s.replace(/[/\\]/g, "_");
+    return s.length > 0 ? s : `unnamed-${fallbackIndex + 1}`;
+  };
+
+  const upsertSourceFile = async (
+    sourceFileKey: string,
+    content: string
+  ): Promise<{ error: string | null }> => {
+    const key = sourceFileKey.trim();
+    if (!key) {
+      return { error: "ファイル名が空です" };
+    }
 
     const { error } = await supabase.from("source_files").upsert(
       {
-        source_file: trimmed,
+        source_file: key,
         content,
         char_count: content.length,
       },
       { onConflict: "source_file" }
     );
 
-    if (error) throw new Error(error.message);
+    return { error: error ? error.message : null };
   };
 
   const extractAndSaveEvents = async (sourceFile: string, text: string) => {
@@ -184,19 +197,40 @@ export default function Home() {
     if (isUploading) return;
 
     setUploadError(null);
+    setUploadFailedFiles([]);
     setUploadProgress(null);
     setIsUploading(true);
+
+    const failedNames: string[] = [];
 
     try {
       const fileArray = Array.from(files);
 
-      for (const file of fileArray) {
-        const rawText = await file.text();
-        setUploadProgress(`${file.name} を処理中...`);
-        await upsertSourceFile(file.name, rawText);
+      for (let i = 0; i < fileArray.length; i++) {
+        const file = fileArray[i];
+        const displayName = file.name;
+        setUploadProgress(`${displayName} を処理中...`);
+
+        let rawText: string;
+        try {
+          rawText = await file.text();
+        } catch {
+          failedNames.push(displayName);
+          continue;
+        }
+
+        const key = sanitizeSourceFileKey(displayName, i);
+        const { error } = await upsertSourceFile(key, rawText);
+        if (error) {
+          failedNames.push(displayName);
+        }
       }
 
       await loadSourceFiles();
+
+      if (failedNames.length > 0) {
+        setUploadFailedFiles(failedNames);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setUploadError(message);
@@ -409,6 +443,20 @@ export default function Home() {
           )}
           {!isUploading && uploadError && (
             <p className="mt-4 text-sm text-[#d8a1a1]">アップロードに失敗しました: {uploadError}</p>
+          )}
+          {!isUploading && uploadFailedFiles.length > 0 && (
+            <div className="mt-4 rounded-xl border border-[#c9a84c]/30 bg-[#0d1323] p-4">
+              <p className="text-sm font-medium text-[#d8a1a1]">
+                以下のファイルは source_files への保存に失敗しました（他のファイルは処理済みです）
+              </p>
+              <ul className="mt-2 list-inside list-disc space-y-1 text-sm text-[#e6d9ae]">
+                {uploadFailedFiles.map((name, idx) => (
+                  <li key={`${idx}-${name}`} className="break-all">
+                    {name}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </section>
 
