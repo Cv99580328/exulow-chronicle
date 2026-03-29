@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { extractUploadedFileText } from "../lib/extractFileText";
 import { supabase } from "../lib/supabase";
 
@@ -195,7 +196,9 @@ export default function Home() {
   const [isBulkExtracting, setIsBulkExtracting] = useState(false);
   const [bulkExtractProgress, setBulkExtractProgress] = useState<string | null>(null);
   const [isLinkingEvents, setIsLinkingEvents] = useState(false);
-  const [analyzedStorySources, setAnalyzedStorySources] = useState<string[]>([]);
+  const [analyzedStoryIdBySource, setAnalyzedStoryIdBySource] = useState<
+    Record<string, string>
+  >({});
   const [storyAnalyzeBusy, setStoryAnalyzeBusy] = useState<string | null>(null);
 
   const [editingOriginalSourceFile, setEditingOriginalSourceFile] = useState<string | null>(
@@ -226,11 +229,6 @@ export default function Home() {
     for (const e of events) m.set(e.id, e);
     return m;
   }, [events]);
-
-  const analyzedStorySet = useMemo(
-    () => new Set(analyzedStorySources),
-    [analyzedStorySources]
-  );
 
   const loadSourceFiles = async () => {
     setIsLoadingSourceFiles(true);
@@ -285,14 +283,18 @@ export default function Home() {
   };
 
   const loadAnalyzedStories = async () => {
-    const { data, error } = await supabase.from("stories").select("source_file");
+    const { data, error } = await supabase.from("stories").select("id,source_file");
     if (error) {
       console.warn("[page] stories select:", error.message);
-      setAnalyzedStorySources([]);
+      setAnalyzedStoryIdBySource({});
       return;
     }
-    const rows = (data ?? []) as { source_file: string }[];
-    setAnalyzedStorySources(rows.map((r) => r.source_file));
+    const rows = (data ?? []) as { id: string; source_file: string }[];
+    const next: Record<string, string> = {};
+    for (const r of rows) {
+      if (r.source_file && r.id) next[r.source_file] = r.id;
+    }
+    setAnalyzedStoryIdBySource(next);
   };
 
   const runAnalyzeStory = async (sourceFile: string) => {
@@ -309,6 +311,7 @@ export default function Home() {
       const body = (await res.json().catch(() => null)) as {
         error?: string;
         detail?: string;
+        story_id?: string;
       } | null;
       if (!res.ok) {
         const msg = body?.detail
@@ -318,7 +321,12 @@ export default function Home() {
             : `HTTP ${res.status}`;
         throw new Error(msg);
       }
-      setAnalyzedStorySources((prev) => (prev.includes(key) ? prev : [...prev, key]));
+      const sid = typeof body?.story_id === "string" ? body.story_id.trim() : "";
+      if (sid) {
+        setAnalyzedStoryIdBySource((prev) => ({ ...prev, [key]: sid }));
+      } else {
+        await loadAnalyzedStories();
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setSupabaseError(message);
@@ -839,8 +847,17 @@ export default function Home() {
                       aria-label={`${row.source_file} を選択`}
                     />
                     <div className="flex min-w-0 items-center gap-2">
-                      <p className="min-w-0 truncate text-sm text-[#f3e8c2]">{row.source_file}</p>
-                      {analyzedStorySet.has(row.source_file) && (
+                      {analyzedStoryIdBySource[row.source_file] ? (
+                        <Link
+                          href={`/works/${analyzedStoryIdBySource[row.source_file]}`}
+                          className="min-w-0 truncate text-sm text-[#f3e8c2] underline-offset-2 transition hover:text-[#c9a84c] hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#c9a84c]"
+                        >
+                          {row.source_file}
+                        </Link>
+                      ) : (
+                        <p className="min-w-0 truncate text-sm text-[#f3e8c2]">{row.source_file}</p>
+                      )}
+                      {analyzedStoryIdBySource[row.source_file] && (
                         <span className="shrink-0 whitespace-nowrap text-xs font-medium text-emerald-400/90">
                           ✓分析済み
                         </span>
