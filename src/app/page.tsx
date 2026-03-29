@@ -35,6 +35,9 @@ export default function Home() {
   const [isReextracting, setIsReextracting] = useState(false);
   const [supabaseError, setSupabaseError] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [selectedWorks, setSelectedWorks] = useState<Record<string, boolean>>({});
+  const [isBulkExtracting, setIsBulkExtracting] = useState(false);
+  const [bulkExtractProgress, setBulkExtractProgress] = useState<string | null>(null);
 
   const [editingOriginalSourceFile, setEditingOriginalSourceFile] = useState<string | null>(
     null
@@ -106,6 +109,21 @@ export default function Home() {
     void loadEvents();
   }, []);
 
+  useEffect(() => {
+    const valid = new Set(sourceFiles.map((s) => s.source_file));
+    setSelectedWorks((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const k of Object.keys(next)) {
+        if (!valid.has(k)) {
+          delete next[k];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [sourceFiles]);
+
   const upsertSourceFile = async (sourceFile: string, content: string) => {
     const trimmed = sourceFile.trim();
     if (!trimmed) return;
@@ -120,6 +138,45 @@ export default function Home() {
     );
 
     if (error) throw new Error(error.message);
+  };
+
+  const extractAndSaveEvents = async (sourceFile: string, text: string) => {
+    const trimmed = sourceFile.trim();
+    if (!trimmed) return;
+
+    const res = await fetch("/api/extract", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => null);
+      throw new Error(errBody?.error ? String(errBody.error) : `HTTP ${res.status}`);
+    }
+
+    const data = (await res.json()) as { events?: EventCard[] };
+    const extractedEvents = Array.isArray(data.events) ? data.events : [];
+
+    const { error: deleteError } = await supabase
+      .from("events")
+      .delete()
+      .eq("source_file", trimmed);
+    if (deleteError) throw new Error(deleteError.message);
+
+    if (extractedEvents.length > 0) {
+      const { error: insertError } = await supabase.from("events").insert(
+        extractedEvents.map((e) => ({
+          source_file: trimmed,
+          time: e.time,
+          title: e.title,
+          cause: e.cause,
+          event: e.event,
+          result: e.result,
+        }))
+      );
+      if (insertError) throw new Error(insertError.message);
+    }
   };
 
   const handleFiles = async (files: FileList | null) => {
@@ -256,39 +313,7 @@ export default function Home() {
     setSupabaseError(null);
 
     try {
-      const res = await fetch("/api/extract", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
-
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => null);
-        throw new Error(errBody?.error ? String(errBody.error) : `HTTP ${res.status}`);
-      }
-
-      const data = (await res.json()) as { events?: EventCard[] };
-      const extractedEvents = Array.isArray(data.events) ? data.events : [];
-
-      const { error: deleteError } = await supabase
-        .from("events")
-        .delete()
-        .eq("source_file", currentName);
-      if (deleteError) throw new Error(deleteError.message);
-
-      if (extractedEvents.length > 0) {
-        const { error: insertError } = await supabase.from("events").insert(
-          extractedEvents.map((e) => ({
-            source_file: currentName,
-            time: e.time,
-            title: e.title,
-            cause: e.cause,
-            event: e.event,
-            result: e.result,
-          }))
-        );
-        if (insertError) throw new Error(insertError.message);
-      }
+      await extractAndSaveEvents(currentName, text);
 
       await loadEvents();
     } catch (err) {
@@ -297,6 +322,47 @@ export default function Home() {
     } finally {
       setIsReextracting(false);
     }
+  };
+
+  const extractWorksSequentially = async (works: SourceFileRow[]) => {
+    if (works.length === 0) return;
+    setIsBulkExtracting(true);
+    setBulkExtractProgress(null);
+    setSupabaseError(null);
+    try {
+      for (const row of works) {
+        setBulkExtractProgress(`${row.source_file} を抽出中...`);
+        await extractAndSaveEvents(row.source_file, row.content ?? "");
+      }
+      await loadEvents();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setSupabaseError(message);
+    } finally {
+      setBulkExtractProgress(null);
+      setIsBulkExtracting(false);
+    }
+  };
+
+  const extractSelectedWorks = () => {
+    const selected = sourceFiles.filter((s) => selectedWorks[s.source_file]);
+    void extractWorksSequentially(selected);
+  };
+
+  const extractAllWorks = () => {
+    void extractWorksSequentially([...sourceFiles]);
+  };
+
+  const selectAllWorks = () => {
+    const next: Record<string, boolean> = {};
+    for (const s of sourceFiles) {
+      next[s.source_file] = true;
+    }
+    setSelectedWorks(next);
+  };
+
+  const deselectAllWorks = () => {
+    setSelectedWorks({});
   };
 
   const onDrop = async (event: DragEvent<HTMLDivElement>) => {
@@ -353,8 +419,52 @@ export default function Home() {
             {sourceFilesSummary.totalChars.toLocaleString()}文字
           </div>
 
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={selectAllWorks}
+              disabled={isLoadingSourceFiles || sourceFiles.length === 0 || isBulkExtracting}
+              className="rounded-lg border border-[#c9a84c]/40 bg-transparent px-3 py-1.5 text-xs font-semibold text-[#c9a84c] transition hover:bg-[#c9a84c]/10 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              全選択
+            </button>
+            <button
+              type="button"
+              onClick={deselectAllWorks}
+              disabled={isLoadingSourceFiles || sourceFiles.length === 0 || isBulkExtracting}
+              className="rounded-lg border border-[#c9a84c]/40 bg-transparent px-3 py-1.5 text-xs font-semibold text-[#c9a84c] transition hover:bg-[#c9a84c]/10 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              全解除
+            </button>
+            <button
+              type="button"
+              onClick={extractSelectedWorks}
+              disabled={
+                isLoadingSourceFiles ||
+                sourceFiles.length === 0 ||
+                isBulkExtracting ||
+                !sourceFiles.some((s) => selectedWorks[s.source_file])
+              }
+              className="rounded-lg bg-[#c9a84c] px-3 py-1.5 text-xs font-semibold text-[#0a0e1a] transition hover:bg-[#d7ba67] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              選択した作品を抽出
+            </button>
+            <button
+              type="button"
+              onClick={extractAllWorks}
+              disabled={isLoadingSourceFiles || sourceFiles.length === 0 || isBulkExtracting}
+              className="rounded-lg border border-[#c9a84c]/40 bg-transparent px-3 py-1.5 text-xs font-semibold text-[#c9a84c] transition hover:bg-[#c9a84c]/10 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              全作品を一括抽出
+            </button>
+          </div>
+          {isBulkExtracting && bulkExtractProgress && (
+            <p className="mt-2 text-sm text-[#b8a97b]">{bulkExtractProgress}</p>
+          )}
+
           <div className="mt-4 overflow-hidden rounded-xl border border-[#c9a84c]/30 bg-[#0d1323]">
-            <div className="grid grid-cols-[1fr_auto_auto_auto] gap-3 border-b border-[#c9a84c]/20 px-4 py-3 text-xs text-[#b8a97b]">
+            <div className="grid grid-cols-[auto_1fr_auto_auto_auto] gap-3 border-b border-[#c9a84c]/20 px-4 py-3 text-xs text-[#b8a97b]">
+              <div className="w-8 shrink-0" aria-hidden />
               <div>作品名</div>
               <div className="text-right">文字数</div>
               <div className="text-right">編集</div>
@@ -369,15 +479,29 @@ export default function Home() {
                 {sourceFiles.map((row) => (
                   <li
                     key={row.source_file}
-                    className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-3 px-4 py-3"
+                    className="grid grid-cols-[auto_1fr_auto_auto_auto] items-center gap-3 px-4 py-3"
                   >
-                    <p className="truncate text-sm text-[#f3e8c2]">{row.source_file}</p>
+                    <input
+                      type="checkbox"
+                      checked={!!selectedWorks[row.source_file]}
+                      onChange={() =>
+                        setSelectedWorks((prev) => ({
+                          ...prev,
+                          [row.source_file]: !prev[row.source_file],
+                        }))
+                      }
+                      disabled={isBulkExtracting}
+                      className="h-4 w-4 shrink-0 rounded border-[#c9a84c]/50 bg-[#0d1323] text-[#c9a84c] accent-[#c9a84c] disabled:opacity-50"
+                      aria-label={`${row.source_file} を選択`}
+                    />
+                    <p className="min-w-0 truncate text-sm text-[#f3e8c2]">{row.source_file}</p>
                     <p className="text-right text-sm text-[#e6d9ae]">{row.char_count.toLocaleString()}</p>
                     <div className="text-right">
                       <button
                         type="button"
                         onClick={() => openEditor(row)}
-                        className="rounded-lg border border-[#c9a84c]/40 bg-transparent px-3 py-1.5 text-xs font-semibold text-[#c9a84c] transition hover:bg-[#c9a84c]/10"
+                        disabled={isBulkExtracting}
+                        className="rounded-lg border border-[#c9a84c]/40 bg-transparent px-3 py-1.5 text-xs font-semibold text-[#c9a84c] transition hover:bg-[#c9a84c]/10 disabled:cursor-not-allowed disabled:opacity-60"
                       >
                         編集
                       </button>
@@ -386,7 +510,7 @@ export default function Home() {
                       <button
                         type="button"
                         onClick={() => void deleteWork(row.source_file)}
-                        disabled={isDeletingSourceFile}
+                        disabled={isDeletingSourceFile || isBulkExtracting}
                         className="rounded-lg border border-[#c9a84c]/40 bg-transparent px-3 py-1.5 text-xs font-semibold text-[#c9a84c] transition hover:bg-[#c9a84c]/10 disabled:cursor-not-allowed disabled:opacity-60"
                       >
                         削除
@@ -443,7 +567,7 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={() => void reextractEventsForEditingWork()}
-                  disabled={isReextracting}
+                  disabled={isReextracting || isBulkExtracting}
                   className="rounded-lg border border-[#c9a84c]/40 bg-transparent px-4 py-2 text-sm font-semibold text-[#c9a84c] transition hover:bg-[#c9a84c]/10 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   本文からイベント再抽出
