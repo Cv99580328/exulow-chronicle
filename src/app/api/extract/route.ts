@@ -28,6 +28,10 @@ export async function POST(req: Request): Promise<Response> {
       );
     }
 
+    if (body.text.length < 100) {
+      return Response.json({ events: [] } satisfies ExtractResponse);
+    }
+
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
       return Response.json(
@@ -119,6 +123,7 @@ ${body.text}
 
     return Response.json(parsed);
   } catch (err) {
+    console.error("[api/extract] Failed to extract events:", err);
     const message = err instanceof Error ? err.message : String(err);
     return Response.json(
       { error: "Failed to extract events.", detail: message },

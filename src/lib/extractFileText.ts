@@ -37,11 +37,31 @@ async function extractTextFromPdf(file: File): Promise<string> {
   return parts.join("\n\n").trim();
 }
 
-async function extractTextWithMammoth(file: File): Promise<string> {
-  const mammoth = (await import("mammoth")).default;
-  const arrayBuffer = await file.arrayBuffer();
-  const result = await mammoth.extractRawText({ arrayBuffer });
-  return result.value.trim();
+/**
+ * .docx（OOXML）および旧 .doc を mammoth で解釈を試みる。
+ * mammoth は .docx を主対象とし .doc は環境によって失敗しやすいため、
+ * 例外または mammoth の error メッセージがある場合は file.text() にフォールバックする。
+ */
+async function extractWordWithMammothOrTextFallback(file: File): Promise<string> {
+  try {
+    const mammoth = (await import("mammoth")).default;
+    const arrayBuffer = await file.arrayBuffer();
+    const result = await mammoth.extractRawText({ arrayBuffer });
+
+    const hasMammothError =
+      result.messages?.some((m) => m.type === "error") ?? false;
+    if (hasMammothError) {
+      return (await file.text()).trim();
+    }
+
+    return (result.value ?? "").trim();
+  } catch {
+    try {
+      return (await file.text()).trim();
+    } catch {
+      return "";
+    }
+  }
 }
 
 /**
@@ -55,7 +75,7 @@ export async function extractUploadedFileText(file: File): Promise<string> {
   }
 
   if (ext === "docx" || ext === "doc") {
-    return extractTextWithMammoth(file);
+    return extractWordWithMammothOrTextFallback(file);
   }
 
   if (ext === "pdf") {
